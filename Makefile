@@ -1,4 +1,4 @@
-CFLAGS = -Wall -O0 -ggdb
+CFLAGS = -Wall -pedantic -O0 -ggdb
 
 all: sprinter
 
