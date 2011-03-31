@@ -2,12 +2,20 @@ CFLAGS = -Wall -pedantic -O0 -ggdb
 
 all: sprinter
 
-sprinter: main.c
+sprinter: main.c sprinter_icon.h
 	gcc $(CFLAGS) `pkg-config --cflags --libs gtk+-2.0` -o $@ $^
+
+sprinter_icon.h: sprinter.png
+	( echo '#include <glib.h>';\
+		gdk-pixbuf-csource --raw --name=sprinter_icon $^ ) \
+			> $@
+
+sprinter.png: sprinter.svg
+	convert -background none $^ -filter Point -resize 64 -quality 100 $@
 
 watch:
 	while inotifywait main.c; do make; done
 
 clean:
-	rm -f *.o sprinter
+	rm -f sprinter.png sprinter_icon.h *.o sprinter
 

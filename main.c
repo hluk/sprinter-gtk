@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
+#include "sprinter_icon.h"
 
 #define TR(x) (x)
 
@@ -18,18 +19,13 @@ enum
 };
 
 static gchar* g_complete = NULL;
+static gulong g_first_item_signal;
 
-/*void exit(int status);*/
-/*void *malloc(size_t size);*/
-/*void free(void *ptr);*/
-
-struct _Argument {
+typedef struct {
     const char shopt;
     const char *opt;
     const char *help;
-};
-
-typedef struct _Argument Argument;
+} Argument;
 
 const Argument arguments[] = {
     {'g', "geometry", "window size and position (format: width,height,x,y)"},
@@ -43,13 +39,11 @@ const Argument arguments[] = {
 
 #define OPTION_UNSET -99999
 
-struct _Options {
+typedef struct {
     const char *title, *label;
     gboolean hide_list, sort_list, strict;
     int x, y, width, height;
-};
-
-typedef struct _Options Options;
+} Options;
 
 /* print help and exit */
 void help(int exit_code) {
@@ -268,6 +262,24 @@ GdkPixbuf *pixbuf_from_file(const gchar *filename)
     }
 
     return pixbuf;
+}
+
+void first_item_inserted(GtkTreeModel *tree_model,
+                         GtkTreePath  *path,
+                         GtkTreeIter  *iter,
+                         gpointer      user_data)
+{
+    gchar *item_text;
+    GtkEntry *entry = GTK_ENTRY(user_data);
+
+    if ( gtk_entry_get_text_length(entry) == 0 ) {
+        gtk_tree_model_get(tree_model, iter, COL_TEXT, &item_text, -1);
+        gtk_entry_set_text(entry, item_text);
+        gtk_entry_select_region(entry, 0, -1);
+        g_free(item_text);
+    }
+
+    g_signal_handler_disconnect(tree_model, g_first_item_signal);
 }
 
 gboolean readStdin(gpointer data)
@@ -516,6 +528,7 @@ int main(int argc, char *argv[])
     GtkWidget *entry;
     GtkWidget *tree_view;
     GtkWidget *scroll_window;
+    GdkPixbuf *pixbuf;
     GtkCellRenderer *renderer;
     GtkTreeViewColumn *col;
     GtkEntryCompletion *completion;
@@ -533,9 +546,12 @@ int main(int argc, char *argv[])
     parseArguments(argc, argv, &options);
 
     gtk_init(&argc, &argv);
-    
+
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title( GTK_WINDOW(window), options.title );
+    /*gtk_window_set_icon_from_file( GTK_WINDOW(window), "sprinter.svg", NULL );*/
+    pixbuf = gdk_pixbuf_new_from_inline(-1, sprinter_icon, FALSE, NULL);
+    gtk_window_set_icon( GTK_WINDOW(window), pixbuf );
 
     layout = gtk_vbox_new(FALSE, 2);
     hbox = gtk_hbox_new(FALSE, 2);
@@ -581,6 +597,7 @@ int main(int argc, char *argv[])
             item_select, GTK_ENTRY(entry), NULL
     );
 
+    gtk_tree_view_set_search_column( GTK_TREE_VIEW(tree_view), COL_TEXT );
     gtk_tree_view_set_headers_visible( GTK_TREE_VIEW(tree_view), FALSE );
     gtk_tree_view_set_fixed_height_mode( GTK_TREE_VIEW(tree_view), TRUE );
     gtk_tree_view_set_enable_tree_lines( GTK_TREE_VIEW(tree_view), FALSE );
@@ -591,6 +608,8 @@ int main(int argc, char *argv[])
     g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press), entry);
     g_signal_connect(tree_view, "key-press-event", G_CALLBACK(tree_view_on_key_press), entry);
     g_signal_connect(entry, "changed", G_CALLBACK(entry_changed), tree_view);
+    g_first_item_signal = g_signal_connect( gtk_tree_view_get_model(GTK_TREE_VIEW(tree_view)),
+                      "row-inserted", G_CALLBACK(first_item_inserted), entry );
 
     /*gtk_container_set_border_width( GTK_CONTAINER(window), 2 );*/
     gtk_container_add( GTK_CONTAINER(window), layout );
@@ -600,7 +619,7 @@ int main(int argc, char *argv[])
     gtk_box_pack_start( GTK_BOX(layout), scroll_window, 1,1,0 );
     gtk_container_add( GTK_CONTAINER(scroll_window), tree_view );
 
-    gtk_window_resize(GTK_WINDOW(window), 320, 320);
+    /* default position: center of the screen */
     gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
 
     /* resize window */
@@ -611,6 +630,8 @@ int main(int argc, char *argv[])
         else if (options.height == OPTION_UNSET)
             options.height = h;
         gtk_window_resize( GTK_WINDOW(window), options.width, options.height );
+    } else {
+        gtk_window_resize(GTK_WINDOW(window), 230, 300);
     }
     /* move window */
     if (options.x != OPTION_UNSET || options.y != OPTION_UNSET) {
