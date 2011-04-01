@@ -18,8 +18,14 @@ enum
     NUM_COLS
 };
 
-static gchar* g_complete = NULL;
-static gulong g_first_item_signal;
+typedef struct {
+    GtkWindow *window;
+    GtkLabel *label;
+    GtkEntry *entry;
+    GtkTreeView *tree_view;
+    GtkScrolledWindow *scroll_window;
+    gboolean complete;
+} Application;
 
 typedef struct {
     const char shopt;
@@ -193,30 +199,33 @@ static void destroy(GtkWidget *w, gpointer data)
     gtk_main_quit();
 }
 
-static gboolean on_key_press(GtkWidget *widget, GdkEvent *event, gpointer data)
+static gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 {
-    GtkEntry *entry;
+    guint key;
 
     if (event->type == GDK_KEY_PRESS){
-        switch (event->key.keyval)
+        key = event->key.keyval;
+        switch (key)
         {
             case GDK_KEY_Escape:
                 gtk_main_quit();
                 return TRUE;
             case GDK_KEY_KP_Enter:
             case GDK_KEY_Return:
-                entry = (GtkEntry *)data;
-                g_print( gtk_entry_get_text(GTK_ENTRY(entry)) );
+                g_print( gtk_entry_get_text(app->entry) );
                 gtk_main_quit();
                 exit(0);
                 return TRUE;
         }
+
+        /* don't complete on some keys */
+        app->complete = key != GDK_KEY_BackSpace && key != GDK_KEY_Delete;
     }
 
     return FALSE;
 }
 
-static gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, gpointer data)
+static gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 {
     if (event->type == GDK_KEY_PRESS && event->key.keyval == GDK_KEY_Up){
         GtkTreePath *path;
@@ -226,7 +235,7 @@ static gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, gpoin
             gtk_tree_path_free(path);
 
             if (!hasprev) {
-                gtk_widget_grab_focus( GTK_WIDGET(data) );
+                gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
                 return TRUE;
             }
         }
@@ -262,24 +271,6 @@ GdkPixbuf *pixbuf_from_file(const gchar *filename)
     }
 
     return pixbuf;
-}
-
-void first_item_inserted(GtkTreeModel *tree_model,
-                         GtkTreePath  *path,
-                         GtkTreeIter  *iter,
-                         gpointer      user_data)
-{
-    gchar *item_text;
-    GtkEntry *entry = GTK_ENTRY(user_data);
-
-    if ( gtk_entry_get_text_length(entry) == 0 ) {
-        gtk_tree_model_get(tree_model, iter, COL_TEXT, &item_text, -1);
-        gtk_entry_set_text(entry, item_text);
-        gtk_entry_select_region(entry, 0, -1);
-        g_free(item_text);
-    }
-
-    g_signal_handler_disconnect(tree_model, g_first_item_signal);
 }
 
 gboolean readStdin(gpointer data)
@@ -335,25 +326,6 @@ gboolean readStdin(gpointer data)
     }
 
     return !ferror(stdin) && !feof(stdin);
-
-    /*
-    while(1) {
-        c = getchar();
-        if ( c == EOF ) {
-            break;
-        } else if ( c == '\n' || c == '\0' ) {
-            if (i>0) {
-                buff[i] = '\0';
-                gtk_list_store_append(list_store, &iter);
-                gtk_list_store_set(list_store, &iter, 0, buff, -1);
-                i = 0;
-            }
-        } else {
-            buff[i] = c;
-            i++;
-        }
-    }
-    */
 }
 
 static GtkTreeModel *create_model_from_stdin()
@@ -394,23 +366,37 @@ const gchar *match_tokens(const gchar *haystack, const gchar *needle, int max)
 
 static gboolean filter_func(GtkTreeModel *model,
         GtkTreeIter  *iter,
-        gpointer data)
+        gpointer user_data)
 {
+    Application *app;
     gboolean visible;
     gchar *item_text;
     const gchar *filter_text;
-    GtkEntry *entry;
     int sela, selb, len;
     gboolean selected;
+    const char *a, *b;
 
-    entry = (GtkEntry *)data;
+    app = (Application *)user_data;
+
     gtk_tree_model_get(model, iter, COL_TEXT, &item_text, -1);
     if (!item_text)
         return FALSE;
-    filter_text = gtk_entry_get_text(entry);
+    filter_text = gtk_entry_get_text(app->entry);
 
-    len = gtk_entry_get_text_length(entry);
-    selected = gtk_editable_get_selection_bounds(GTK_EDITABLE(entry), &sela, &selb);
+    len = gtk_entry_get_text_length(app->entry);
+    selected = gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), &sela, &selb);
+
+    /* inline completion */
+    if (!selected && app->complete) {
+        /* if item starts with filter text */
+        for( a = item_text, b = filter_text;
+             *a && *b && toupper(*a) == toupper(*b);
+             ++a, ++b );
+        if (*a && !*b) {
+            gtk_editable_insert_text( GTK_EDITABLE(app->entry), a, -1, &sela );
+            gtk_entry_select_region(app->entry, -1, selb);
+        }
+    }
 
     visible = match_tokens(item_text, filter_text, sela) != NULL;
 
@@ -420,60 +406,15 @@ static gboolean filter_func(GtkTreeModel *model,
     return visible;
 }
 
-static GtkTreeModel *create_filter(GtkTreeModel *model, GtkEntry *entry)
+static GtkTreeModel *create_filter(GtkTreeModel *model, Application *app)
 {
     GtkTreeModel *filter;
 
     filter = gtk_tree_model_filter_new(model, NULL);
     gtk_tree_model_filter_set_visible_func( GTK_TREE_MODEL_FILTER(filter),
-            filter_func, entry, NULL );
+            filter_func, app, NULL );
 
     return filter;
-}
-
-gboolean match_func( GtkEntryCompletion *completion,
-                     const gchar *key,
-                     GtkTreeIter *iter,
-                     gpointer user_data)
-{
-    gchar *item;
-    const gchar *a, *b;
-    gboolean result = FALSE;
-    GtkTreeModel *model;
-
-    model = gtk_entry_completion_get_model(completion);
-    gtk_tree_model_get(model, iter, COL_TEXT, &item, -1);
-    if (item) {
-        if (g_complete) {
-            result = strcmp(g_complete, item) == 0;
-            g_free(item);
-        } else {
-            for( a=item, b=key; *a && *b && toupper(*a) == toupper(*b); ++a, ++b);
-            if (!*b) {
-                result = TRUE;
-                g_complete = item;
-            } else {
-                g_free(item);
-            }
-        }
-    }
-
-    return result;
-}
-
-static GtkEntryCompletion *create_completion(GtkTreeModel *model)
-{
-    GtkEntryCompletion *completion;
-
-    completion = gtk_entry_completion_new();
-    gtk_entry_completion_set_match_func(completion, match_func, NULL, NULL);
-    gtk_entry_completion_set_model(completion, model);
-    gtk_entry_completion_set_text_column(completion, COL_TEXT);
-    gtk_entry_completion_set_popup_completion(completion, FALSE);
-    gtk_entry_completion_set_inline_selection(completion, TRUE);
-    gtk_entry_completion_set_inline_completion(completion, TRUE);
-
-    return completion;
 }
 
 gboolean item_select (GtkTreeSelection *selection, GtkTreeModel *model,
@@ -501,41 +442,31 @@ gboolean refilter(gpointer data)
     return FALSE;
 }
 
-void entry_changed(GtkEntry *entry, GtkTreeView *tree_view)
+void entry_changed(GtkEntry *entry, Application *app)
 {
     static GSource *source = NULL;
 
     if ( gtk_widget_has_focus(GTK_WIDGET(entry)) ) {
-        if (g_complete) {
-            g_free(g_complete);
-            g_complete = NULL;
-        }
-
         if (source)
             g_source_destroy(source);
-        source = g_timeout_source_new(300);
-        g_source_set_callback(source, refilter, tree_view, NULL);
+        source = g_timeout_source_new(200);
+        g_source_set_callback(source, refilter, app->tree_view, NULL);
         g_source_attach(source, NULL);
     }
 }
 
 int main(int argc, char *argv[])
 {
-    GtkWidget *window;
     GtkWidget *layout;
     GtkWidget *hbox;
-    GtkWidget *label;
-    GtkWidget *entry;
-    GtkWidget *tree_view;
-    GtkWidget *scroll_window;
     GdkPixbuf *pixbuf;
     GtkCellRenderer *renderer;
     GtkTreeViewColumn *col;
-    GtkEntryCompletion *completion;
     GtkTreeModel *model;
     Options options;
     gint w, h, x ,y;
     GdkGravity gravity;
+    Application app;
 
     /* default options */
     options.title = "sprinter";
@@ -547,29 +478,27 @@ int main(int argc, char *argv[])
 
     gtk_init(&argc, &argv);
 
-    window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title( GTK_WINDOW(window), options.title );
-    /*gtk_window_set_icon_from_file( GTK_WINDOW(window), "sprinter.svg", NULL );*/
+    app.complete = TRUE;
+
+    app.window = GTK_WINDOW( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
+    gtk_window_set_title( app.window, options.title );
+    /*gtk_window_set_icon_from_file( app.window, "sprinter.svg", NULL );*/
     pixbuf = gdk_pixbuf_new_from_inline(-1, sprinter_icon, FALSE, NULL);
-    gtk_window_set_icon( GTK_WINDOW(window), pixbuf );
+    gtk_window_set_icon( app.window, pixbuf );
 
     layout = gtk_vbox_new(FALSE, 2);
     hbox = gtk_hbox_new(FALSE, 2);
 
     /* entry */
-    entry = gtk_entry_new();
-    label = gtk_label_new(options.label);
+    app.entry = GTK_ENTRY( gtk_entry_new() );
+    app.label = GTK_LABEL( gtk_label_new(options.label) );
     model = create_model_from_stdin();
-    model = create_filter( model, GTK_ENTRY(entry) );
-
-    /* entry completion */
-    completion = create_completion( GTK_TREE_MODEL(model) );
-    gtk_entry_set_completion( GTK_ENTRY(entry), completion );
+    model = create_filter(model, &app);
 
     /* list */
-    tree_view = gtk_tree_view_new_with_model(model);
-    scroll_window = gtk_scrolled_window_new(NULL, NULL);
-    gtk_scrolled_window_set_policy( GTK_SCROLLED_WINDOW(scroll_window),
+    app.tree_view = GTK_TREE_VIEW( gtk_tree_view_new_with_model(model) );
+    app.scroll_window = GTK_SCROLLED_WINDOW( gtk_scrolled_window_new(NULL, NULL) );
+    gtk_scrolled_window_set_policy( app.scroll_window,
             GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC );
 
     col = gtk_tree_view_column_new();
@@ -590,52 +519,50 @@ int main(int argc, char *argv[])
                                         "text", COL_TEXT,
                                         NULL);
 
-    gtk_tree_view_append_column(GTK_TREE_VIEW(tree_view), col);
+    gtk_tree_view_append_column(app.tree_view, col);
 
     gtk_tree_selection_set_select_function(
-            gtk_tree_view_get_selection(GTK_TREE_VIEW(tree_view)),
-            item_select, GTK_ENTRY(entry), NULL
+            gtk_tree_view_get_selection(app.tree_view),
+            item_select, app.entry, NULL
     );
 
-    gtk_tree_view_set_search_column( GTK_TREE_VIEW(tree_view), COL_TEXT );
-    gtk_tree_view_set_headers_visible( GTK_TREE_VIEW(tree_view), FALSE );
-    gtk_tree_view_set_fixed_height_mode( GTK_TREE_VIEW(tree_view), TRUE );
-    gtk_tree_view_set_enable_tree_lines( GTK_TREE_VIEW(tree_view), FALSE );
+    gtk_tree_view_set_search_column( app.tree_view, COL_TEXT );
+    gtk_tree_view_set_headers_visible( app.tree_view, FALSE );
+    gtk_tree_view_set_fixed_height_mode( app.tree_view, TRUE );
+    gtk_tree_view_set_enable_tree_lines( app.tree_view, FALSE );
 
     g_object_unref(model);
 
-    g_signal_connect(window, "destroy", G_CALLBACK(destroy), NULL);
-    g_signal_connect(window, "key-press-event", G_CALLBACK(on_key_press), entry);
-    g_signal_connect(tree_view, "key-press-event", G_CALLBACK(tree_view_on_key_press), entry);
-    g_signal_connect(entry, "changed", G_CALLBACK(entry_changed), tree_view);
-    g_first_item_signal = g_signal_connect( gtk_tree_view_get_model(GTK_TREE_VIEW(tree_view)),
-                      "row-inserted", G_CALLBACK(first_item_inserted), entry );
+    g_signal_connect(app.window, "destroy", G_CALLBACK(destroy), NULL);
+    g_signal_connect(app.window, "key-press-event", G_CALLBACK(on_key_press), &app);
+    g_signal_connect(app.tree_view, "key-press-event", G_CALLBACK(tree_view_on_key_press), &app);
+    g_signal_connect(app.entry, "changed", G_CALLBACK(entry_changed), &app);
 
     /*gtk_container_set_border_width( GTK_CONTAINER(window), 2 );*/
-    gtk_container_add( GTK_CONTAINER(window), layout );
-    gtk_box_pack_start( GTK_BOX(hbox), label, 0,1,0 );
-    gtk_box_pack_start( GTK_BOX(hbox), entry, 1,1,0 );
+    gtk_container_add( GTK_CONTAINER(app.window), layout );
+    gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app.label), 0,1,0 );
+    gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app.entry), 1,1,0 );
     gtk_box_pack_start( GTK_BOX(layout), hbox, 0,1,0 );
-    gtk_box_pack_start( GTK_BOX(layout), scroll_window, 1,1,0 );
-    gtk_container_add( GTK_CONTAINER(scroll_window), tree_view );
+    gtk_box_pack_start( GTK_BOX(layout), GTK_WIDGET(app.scroll_window), 1,1,0 );
+    gtk_container_add( GTK_CONTAINER(app.scroll_window), GTK_WIDGET(app.tree_view) );
 
     /* default position: center of the screen */
-    gtk_window_set_position(GTK_WINDOW(window), GTK_WIN_POS_CENTER);
+    gtk_window_set_position(app.window, GTK_WIN_POS_CENTER);
 
     /* resize window */
     if (options.height != OPTION_UNSET || options.width != OPTION_UNSET) {
-        gtk_window_get_size( GTK_WINDOW(window), &w, &h );
+        gtk_window_get_size( app.window, &w, &h );
         if (options.width == OPTION_UNSET)
             options.width = w;
         else if (options.height == OPTION_UNSET)
             options.height = h;
-        gtk_window_resize( GTK_WINDOW(window), options.width, options.height );
+        gtk_window_resize( app.window, options.width, options.height );
     } else {
-        gtk_window_resize(GTK_WINDOW(window), 230, 300);
+        gtk_window_resize(app.window, 230, 300);
     }
     /* move window */
     if (options.x != OPTION_UNSET || options.y != OPTION_UNSET) {
-        gtk_window_get_position( GTK_WINDOW(window), &x, &y );
+        gtk_window_get_position( app.window, &x, &y );
         if (options.x == OPTION_UNSET)
             options.x = x;
         else if (options.y == OPTION_UNSET)
@@ -654,17 +581,12 @@ int main(int argc, char *argv[])
         } else {
             gravity = GDK_GRAVITY_NORTH_WEST;
         }
-        gtk_window_set_gravity( GTK_WINDOW(window), gravity );
-        gtk_window_move( GTK_WINDOW(window), options.x, options.y );
+        gtk_window_set_gravity( app.window, gravity );
+        gtk_window_move( app.window, options.x, options.y );
     }
 
-    gtk_widget_show_all(window);
-    /*gtk_widget_show(layout);*/
-    /*gtk_widget_show(entry);*/
-    /*gtk_widget_show(scroll_window);*/
-    /*gtk_widget_show(tree_view);*/
+    gtk_widget_show_all( GTK_WIDGET(app.window) );
 
-    gtk_widget_grab_focus(entry);
     gtk_main();
 
     /* exit code is 0 only if an item was submitted - i.e. ENTER pressed*/
