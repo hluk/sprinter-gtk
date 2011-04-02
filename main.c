@@ -13,7 +13,8 @@
 
 enum
 {
-    COL_ICON = 0,
+    COL_VISIBLE = 0,
+    COL_ICON,
     COL_TEXT,
     NUM_COLS
 };
@@ -24,7 +25,9 @@ typedef struct {
     GtkEntry *entry;
     GtkTreeView *tree_view;
     GtkScrolledWindow *scroll_window;
+    GtkListStore *store;
     gboolean complete;
+    gboolean insert_first;
 } Application;
 
 typedef struct {
@@ -273,72 +276,6 @@ GdkPixbuf *pixbuf_from_file(const gchar *filename)
     return pixbuf;
 }
 
-gboolean readStdin(gpointer data)
-{
-    static gchar buf[BUFSIZ];
-    static const gchar *const buf_begin = buf;
-    static gchar *bufp = buf;
-    static struct timeval stdin_tv = {0,0};
-    fd_set stdin_fds;
-    GtkTreeIter iter;
-    GdkPixbuf *pixbuf;
-    GtkListStore *list_store = (GtkListStore *)data;
-
-    /*
-     * interrupt after reading at most N lines and
-     * resume after processing pending events in event loop
-     */
-    int i = 0;
-    for( ; i < 20; ++i ) {
-        /* set stdin */
-        FD_ZERO(&stdin_fds);
-        FD_SET(STDIN_FILENO, &stdin_fds);
-
-        /* check if data available */
-        if ( select(STDIN_FILENO+1, &stdin_fds, NULL, NULL, &stdin_tv) <= 0 )
-            break;
-
-        /* read data */
-        if ( fgets(bufp, BUFSIZ - (bufp - buf_begin), stdin) ) {
-            while ( *bufp != '\0' ) ++bufp;
-            /* each line is one item */
-            if ( *(bufp-1) == '\n' ) {
-                *(bufp-1) = '\0';
-                pixbuf = pixbuf_from_file(buf);
-
-                gtk_list_store_append(list_store, &iter);
-                gtk_list_store_set( list_store, &iter,
-                        /*COL_ICON, GTK_STOCK_EDIT,*/
-                        /*COL_ICON, mime_icon,*/
-                        COL_ICON, pixbuf,
-                        COL_TEXT, buf,
-                        -1 );
-
-                if (pixbuf)
-                    g_object_unref(pixbuf);
-                bufp = buf;
-            } else if ( bufp >= &buf[BUFSIZ-1] ) {
-                fprintf(stderr, "Line too big (BUFSIZE is %d)!\n", BUFSIZ);
-            }
-        } else {
-            break;
-        }
-    }
-
-    return !ferror(stdin) && !feof(stdin);
-}
-
-static GtkTreeModel *create_model_from_stdin()
-{
-    GtkListStore *list_store;
-
-    list_store = gtk_list_store_new(2, GDK_TYPE_PIXBUF, G_TYPE_STRING);
-
-    g_idle_add(readStdin, list_store);
-
-    return GTK_TREE_MODEL(list_store);
-}
-
 const gchar *match_tokens(const gchar *haystack, const gchar *needle, int max)
 {
     const gchar *h, *hh, *nn;
@@ -364,60 +301,96 @@ const gchar *match_tokens(const gchar *haystack, const gchar *needle, int max)
     return NULL;
 }
 
-static gboolean filter_func(GtkTreeModel *model,
-        GtkTreeIter  *iter,
-        gpointer user_data)
+gboolean readStdin(gpointer user_data)
 {
+    static gchar buf[BUFSIZ];
+    static const gchar *const buf_begin = buf;
+    static gchar *bufp = buf;
+    static struct timeval stdin_tv = {0,0};
+    const char *filter_text, *a, *b;
+    int sela, selb;
+    fd_set stdin_fds;
+    GtkTreeIter iter;
+    GdkPixbuf *pixbuf;
     Application *app;
-    gboolean visible;
-    gchar *item_text;
-    const gchar *filter_text;
-    int sela, selb, len;
-    gboolean selected;
-    const char *a, *b;
 
     app = (Application *)user_data;
 
-    gtk_tree_model_get(model, iter, COL_TEXT, &item_text, -1);
-    if (!item_text)
-        return FALSE;
-    filter_text = gtk_entry_get_text(app->entry);
+    /*
+     * interrupt after reading at most N lines and
+     * resume after processing pending events in event loop
+     */
+    int i = 0;
+    for( ; i < 20; ++i ) {
+        /* set stdin */
+        FD_ZERO(&stdin_fds);
+        FD_SET(STDIN_FILENO, &stdin_fds);
 
-    len = gtk_entry_get_text_length(app->entry);
-    selected = gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), &sela, &selb);
+        /* check if data available */
+        if ( select(STDIN_FILENO+1, &stdin_fds, NULL, NULL, &stdin_tv) <= 0 )
+            break;
 
-    /* inline completion */
-    if (!selected && app->complete) {
-        /* if item starts with filter text */
-        for( a = item_text, b = filter_text;
-             *a && *b && toupper(*a) == toupper(*b);
-             ++a, ++b );
-        if (*a && !*b) {
-            gtk_editable_insert_text( GTK_EDITABLE(app->entry), a, -1, &sela );
-            gtk_entry_select_region(app->entry, -1, selb);
+        /* read data */
+        if ( fgets(bufp, BUFSIZ - (bufp - buf_begin), stdin) ) {
+            while ( *bufp != '\0' ) ++bufp;
+            /* each line is one item */
+            if ( *(bufp-1) == '\n' ) {
+                *(bufp-1) = '\0';
+                pixbuf = pixbuf_from_file(buf);
+
+                filter_text = gtk_entry_get_text(app->entry);
+                if ( !gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), &sela, &selb) ) {
+                    /* inline completion */
+                    if (app->complete) {
+                        /* if item starts with filter text */
+                        for( a = buf, b = filter_text;
+                                *a && *b && toupper(*a) == toupper(*b);
+                                ++a, ++b );
+                        if (*a && !*b) {
+                            gtk_editable_insert_text( GTK_EDITABLE(app->entry), a, -1, &sela );
+                            gtk_entry_select_region(app->entry, -1, selb);
+                        }
+                    }
+                }
+                if ( app->insert_first ) {
+                    app->insert_first = TRUE;
+                    if ( !*filter_text ) {
+                        gtk_entry_set_text(app->entry, buf);
+                        gtk_entry_select_region(app->entry, -1, 0);
+                    }
+                }
+                gtk_list_store_append(app->store, &iter);
+                gtk_list_store_set( app->store, &iter,
+                        COL_VISIBLE, match_tokens(buf, filter_text, sela),
+                        COL_ICON, pixbuf,
+                        COL_TEXT, buf,
+                        -1 );
+
+                if (pixbuf)
+                    g_object_unref(pixbuf);
+                bufp = buf;
+            } else if ( bufp >= &buf[BUFSIZ-1] ) {
+                fprintf(stderr, "Line too big (BUFSIZ is %d)!\n", BUFSIZ);
+            }
+        } else {
+            break;
         }
     }
 
-    visible = match_tokens(item_text, filter_text, sela) != NULL;
-
-    /*visible = ( item && strcmp(item, gtk_entry_get_text(entry)) == 0 );*/
-    g_free(item_text);
-
-    return visible;
+    return !ferror(stdin) && !feof(stdin);
 }
 
-static GtkTreeModel *create_filter(GtkTreeModel *model, Application *app)
+static GtkTreeModel *create_filter(GtkListStore *store)
 {
     GtkTreeModel *filter;
 
-    filter = gtk_tree_model_filter_new(model, NULL);
-    gtk_tree_model_filter_set_visible_func( GTK_TREE_MODEL_FILTER(filter),
-            filter_func, app, NULL );
+    filter = gtk_tree_model_filter_new( GTK_TREE_MODEL(store), NULL );
+    gtk_tree_model_filter_set_visible_column( GTK_TREE_MODEL_FILTER(filter), COL_VISIBLE );
 
     return filter;
 }
 
-gboolean item_select (GtkTreeSelection *selection, GtkTreeModel *model,
+gboolean item_select(GtkTreeSelection *selection, GtkTreeModel *model,
         GtkTreePath *path, gboolean path_currently_selected, gpointer data)
 {
     gchar *item;
@@ -435,10 +408,54 @@ gboolean item_select (GtkTreeSelection *selection, GtkTreeModel *model,
     return TRUE;
 }
 
-gboolean refilter(gpointer data)
+gboolean refilter(gpointer user_data)
 {
-    gtk_tree_model_filter_refilter(
-            GTK_TREE_MODEL_FILTER(gtk_tree_view_get_model(GTK_TREE_VIEW(data))) );
+    /* TODO: if text appended to entry - refilter only visible items
+     *       - save entry text as static variable and next time
+     *         check against new entry text
+     */
+    Application *app;
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    gchar *item_text;
+    const gchar *filter_text, *a, *b;
+    gboolean selected, visible;
+    int sela, selb;
+
+    app = (Application *)user_data;
+
+    selected = gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), &sela, &selb);
+    if (selected)
+        return FALSE;
+
+    model = GTK_TREE_MODEL(app->store);
+    filter_text = gtk_entry_get_text(app->entry);
+
+    if ( gtk_tree_model_get_iter_first(model, &iter) ) {
+        do {
+            gtk_tree_model_get(model, &iter, COL_TEXT, &item_text, -1);
+            if (item_text) {
+                /* inline completion */
+                if (app->complete) {
+                    /* if item starts with filter text */
+                    for( a = item_text, b = filter_text;
+                            *a && *b && toupper(*a) == toupper(*b);
+                            ++a, ++b );
+                    if (*a && !*b) {
+                        gtk_editable_insert_text( GTK_EDITABLE(app->entry), a, -1, &sela );
+                        gtk_entry_select_region(app->entry, -1, selb);
+                    }
+                }
+
+                visible = match_tokens(item_text, filter_text, selb) != NULL;
+                fprintf(stderr, "%c %s:%d %s\n", visible ? '1' : '0', filter_text, selb, item_text);
+                gtk_list_store_set(app->store, &iter, COL_VISIBLE, visible, -1);
+
+                g_free(item_text);
+            }
+        } while( gtk_tree_model_iter_next(model, &iter) );
+    }
+
     return FALSE;
 }
 
@@ -447,10 +464,11 @@ void entry_changed(GtkEntry *entry, Application *app)
     static GSource *source = NULL;
 
     if ( gtk_widget_has_focus(GTK_WIDGET(entry)) ) {
+        app->insert_first = FALSE;
         if (source)
             g_source_destroy(source);
         source = g_timeout_source_new(200);
-        g_source_set_callback(source, refilter, app->tree_view, NULL);
+        g_source_set_callback(source, refilter, app, NULL);
         g_source_attach(source, NULL);
     }
 }
@@ -479,6 +497,7 @@ int main(int argc, char *argv[])
     gtk_init(&argc, &argv);
 
     app.complete = TRUE;
+    app.insert_first = TRUE;
 
     app.window = GTK_WINDOW( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
     gtk_window_set_title( app.window, options.title );
@@ -492,8 +511,16 @@ int main(int argc, char *argv[])
     /* entry */
     app.entry = GTK_ENTRY( gtk_entry_new() );
     app.label = GTK_LABEL( gtk_label_new(options.label) );
-    model = create_model_from_stdin();
-    model = create_filter(model, &app);
+
+    /* list store and filtered model */
+    app.store = gtk_list_store_new( 3,
+                    G_TYPE_BOOLEAN,
+                    GDK_TYPE_PIXBUF,
+                    G_TYPE_STRING );
+    model = create_filter(app.store);
+
+    /* append lines from stdin to list store */
+    g_idle_add(readStdin, &app);
 
     /* list */
     app.tree_view = GTK_TREE_VIEW( gtk_tree_view_new_with_model(model) );
