@@ -1,3 +1,2 @@
-- if appending text to entry - refilter only visible items
 - implement program options: sort (-o), strict (-S)
 
