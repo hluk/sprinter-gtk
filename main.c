@@ -10,6 +10,10 @@
 
 #include "sprinter_icon.h"
 
+
+/** buffer too small error string */
+#define ERR_BUFFER_TOO_SMALL "Line too big (BUFSIZ is %d)!\n"
+
 /**
  * maximum number of input reads until control is
  * returned to main event loop
@@ -18,6 +22,11 @@
 
 /** Delay list refiltering for \c REFILTER_DELAY milliseconds. */
 #define REFILTER_DELAY 200
+
+/** default input separator */
+#define DEFAULT_INPUT_SEPARATOR "\n"
+/** default output separator */
+#define DEFAULT_OUTPUT_SEPARATOR NULL
 
 /** default window width */
 #define DEFAULT_WINDOW_WIDTH 230
@@ -56,8 +65,6 @@ typedef struct {
     gboolean complete;
     /** Temporarily toggle list filtering. */
     gboolean filter;
-    /** Sets entry text (if not changed) to first item text. */
-    gboolean insert_first;
     /** timer for filtering items (for better performance) */
     GSource *filter_timer;
 
@@ -66,6 +73,11 @@ typedef struct {
 
     /** window height */
     gint height;
+
+    /** input separator*/
+    char *i_separator;
+    /** output separator*/
+    char *o_separator;
 } Application;
 
 /** program arguments */
@@ -82,10 +94,12 @@ typedef struct {
 const Argument arguments[] = {
     {'g', "geometry", "window size and position (format: width,height,[-]x,[-]y)"},
     {'h', "help",     "show this help"},
+    {'i', "input-separator",  "string which separates items on input"},
     {'l', "label",    "text input label"},
     {'m', "minimal",  "hide list (press TAB key to show the list)"},
-    {'o', "sort",     "sort items alphabetically"},
-    {'S', "strict",   "choose only items from stdin"},
+    {'o', "output-separator",  "string which separates items on output"},
+    /*{'s', "sort",     "sort items alphabetically"},*/
+    /*{'S', "strict",   "choose only items from stdin"},*/
     {'t', "title",    "title"}
 };
 
@@ -99,6 +113,7 @@ const Argument arguments[] = {
 typedef struct {
     /** main window title */
     const char *title;
+
     /**\{ \name Main window geometry */
     /** X position */
     gint x,
@@ -109,6 +124,7 @@ typedef struct {
     /** height */
         height;
     /**\}*/
+
     /** entry label text */
     const char *label;
     /** Hide list initially (minimal mode). */
@@ -117,6 +133,11 @@ typedef struct {
     gboolean sort_list;
     /** \b TODO: If entry text submitted, check if item with same text exists. */
     gboolean strict;
+
+    /** input separator*/
+    char *i_separator;
+    /** output separator*/
+    char *o_separator;
 } Options;
 
 /** Print help and exit. */
@@ -135,6 +156,40 @@ void help(int exit_code) {
 }
 
 /**
+ * Unescapes string.
+ * \returns new unescaped string
+ */
+gchar *unescape(const gchar *str)
+{
+    /* new string is not larger than original */
+    gchar *result, *r;
+    const gchar *s;
+    gboolean escape;
+
+    result = malloc( strlen(str) );
+
+    for( s = str, r = result, escape = FALSE; *s; ++s ) {
+        if (escape) {
+            if (*s == 'n')
+                *(r++) = '\n';
+            else if (*s == 't')
+                *(r++) = '\t';
+            else
+                *(r++) = *s;
+            escape = FALSE;
+        } else if (*s == '\\') {
+            escape = TRUE;
+        } else {
+            *(r++) = *s;
+        }
+    }
+    *r = 0;
+    printf("|%s|\n ", result);
+
+    return result;
+}
+
+/**
  * Sets options for application.
  * Sets \a options accordingly to arguments passed to program.
  */
@@ -142,9 +197,19 @@ void set_options(int argc, char *argv[], Options *options)
 {
     int num, num2;
     gboolean force_arg;
-    const char *argp;
+    char *argp;
     char c, arg;
     int i, j, len;
+
+    /* default options */
+    options->title = "sprinter";
+    options->label = "select:";
+    options->hide_list = options->sort_list = options->strict = FALSE;
+    options->x = options->y = OPTION_UNSET;
+    options->width  = DEFAULT_WINDOW_WIDTH;
+    options->height = DEFAULT_WINDOW_HEIGHT;
+    options->i_separator = DEFAULT_INPUT_SEPARATOR;
+    options->o_separator = DEFAULT_OUTPUT_SEPARATOR;
 
     len = sizeof(arguments)/sizeof(Argument);
     i = 1;
@@ -241,6 +306,10 @@ void set_options(int argc, char *argv[], Options *options)
         } else if (arg == 'h') {
             if (force_arg) help(1);
             help(0);
+        } else if (arg == 'i') {
+            if (!argp) help(1);
+            ++i;
+            options->i_separator = unescape(argp);
         } else if (arg == 'l') {
             if (!argp) help(1);
             ++i;
@@ -249,6 +318,10 @@ void set_options(int argc, char *argv[], Options *options)
             if (force_arg) help(1);
             options->hide_list = TRUE;
         } else if (arg == 'o') {
+            if (!argp) help(1);
+            ++i;
+            options->o_separator = unescape(argp);
+        } else if (arg == 's') {
             if (force_arg) help(1);
             options->sort_list = TRUE;
         } else if (arg == 'S') {
@@ -295,6 +368,7 @@ void show_list(Application *app)
 gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 {
     guint key;
+    GtkTreePath *path;
 
     if (event->type == GDK_KEY_PRESS){
         key = event->key.keyval;
@@ -312,14 +386,36 @@ gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
                 exit(0);
                 return TRUE;
             /**
-             * If tab or down key pressed and entry widget has focus, show and focus list.
+             * If tab or down key pressed and entry widget has focus,
+             * show and focus list.
              */
             case GDK_KEY_Tab:
             case GDK_KEY_Down:
                 if ( gtk_widget_has_focus(GTK_WIDGET(app->entry)) ) {
                     if (app->hide_list)
                         show_list(app);
+
+                    gtk_tree_view_get_cursor( app->tree_view, &path, NULL);
                     gtk_widget_grab_focus( GTK_WIDGET(app->tree_view) );
+
+                    if (!path) {
+                        path = gtk_tree_path_new_first();
+                        gtk_tree_view_set_cursor( app->tree_view, path, NULL, FALSE );
+                    }
+                    gtk_tree_path_free(path);
+
+                    return TRUE;
+                }
+                break;
+            /**
+             * If left or right arrow pressed and list has focus,
+             * focus widget and set cursor position.
+             */
+            case GDK_KEY_Left:
+            case GDK_KEY_Right:
+                if ( gtk_widget_has_focus(GTK_WIDGET(app->tree_view)) ) {
+                    gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
+                    gtk_entry_set_position( app->entry, key == GDK_KEY_Left ? 0 : -1 );
                     return TRUE;
                 }
                 break;
@@ -390,18 +486,17 @@ GdkPixbuf *pixbuf_from_file(const gchar *filename)
  * Search is case insensitive.
  * \return pointer to first matched substring in \a haystack, NULL if not found
  */
-const gchar *match_tokens(const gchar *haystack, const gchar *needle, int max)
+const gchar *match_tokens(const gchar *haystack, const gchar *needle)
 {
     const gchar *h, *hh, *nn;
-    int i;
 
     if ( !*needle )
         return haystack;
 
     for ( h = haystack; *h; ++h ) {
-        for ( i = 0, hh = h, nn = needle; *hh && *nn && i < max ; ++i, ++hh, ++nn ) {
+        for ( hh = h, nn = needle; *hh && *nn; ++hh, ++nn ) {
             if ( *nn == ' ' ) {
-                if ( match_tokens(hh, nn+1, max-i) )
+                if ( match_tokens(hh, nn+1) )
                     return h;
                 else
                     break;
@@ -409,7 +504,7 @@ const gchar *match_tokens(const gchar *haystack, const gchar *needle, int max)
                 break;
             }
         }
-        if (!*nn || i == max)
+        if (!*nn)
             return h;
     }
     return NULL;
@@ -439,26 +534,127 @@ void append_item(GtkTreeIter *iter, const gchar *text, gboolean visible, GtkList
  * Completes text in entry.
  * \return TRUE if completion was successful, FALSE otherwise
  */
-gboolean complete(const gchar *text, GtkEntry *entry)
+gboolean complete(const gchar *text, Application *app)
 {
     const char *filter_text;
     const char *a, *b;
     gint pos = -1;
 
-    filter_text = gtk_entry_get_text(entry);
+    filter_text = gtk_entry_get_text(app->entry);
 
     /* if item starts with filter text */
     for( a = text, b = filter_text;
             *a && *b && toupper(*a) == toupper(*b);
             ++a, ++b );
     if (*a && !*b) {
-        gtk_editable_insert_text( GTK_EDITABLE(entry), a, -1, &pos );
-        gtk_entry_select_region(entry, -1, (gint)(b-filter_text));
+        app->filter = FALSE;
+        gtk_editable_insert_text( GTK_EDITABLE(app->entry), a, -1, &pos );
+        gtk_entry_select_region(app->entry, -1, (gint)(b-filter_text));
+        app->filter = TRUE;
 
         return TRUE;
     }
 
     return FALSE;
+}
+
+/**
+ * Returns filter text and selection bounds.
+ * Filter text is last output item without characters after
+ * text cursor or within and after selected text region.
+ * \returns filter text
+ */
+gchar *get_filter_text(gint *from, gint *to, Application *app)
+{
+    const gchar *filter_text;
+    gchar *sep = app->o_separator;
+    gchar *a;
+    gint sep_len;
+
+    gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), from, to);
+    if (*from == *to)
+        *to = gtk_entry_get_text_length(app->entry);
+
+    filter_text = gtk_entry_get_text(app->entry);
+
+    if (sep && *sep) {
+        sep_len = strlen(sep);
+        while( (a = strstr(filter_text, sep)) ) {
+            filter_text = a+sep_len;
+        }
+    }
+
+    return g_strndup(filter_text, *from);
+}
+
+/**
+ * Appends items to list.
+ * Appends all items in \a str separated by input separator (\c app->i_separator).
+ * Last item is addad only if \a last is \c TRUE.
+ * \callgraph
+ */
+char *append_items(char *str, gboolean last, Application *app)
+{
+    char *sep = app->i_separator;
+    int sep_len = strlen(sep);
+    char *a, *b;
+    gboolean visible;
+    int from, to;
+    GtkTreeIter iter;
+    gchar *filter_text;
+
+    filter_text = get_filter_text(&from, &to, app);
+    app->complete &= from == to;
+
+    a = str;
+    b = NULL;
+    while( (*sep && (b = strstr(a, sep))) || last ) {
+        if (last && !b) {
+            b = str + strlen(str);
+            sep_len = 0;
+        }
+        *b = 0;
+
+        visible = match_tokens(a, filter_text) != NULL;
+
+        /**
+         * Does in-line completion only for last output item and only if:
+         * - no text in entry is selected and
+         * - text cursor is at the end of entry and
+         * - \c app->complete is \c TRUE.
+         */
+        if ( app->complete && visible && !app->filter_timer &&
+                gtk_entry_get_text_length(app->entry) == to ) {
+            complete(a, app);
+        }
+
+        /* append new item */
+        append_item(&iter, a, visible, app->store);
+
+        /* last item added */
+        if (sep_len == 0)
+            break;
+
+        a = b+sep_len;
+    }
+
+    g_free(filter_text);
+
+    /* move last incomplete item to the begging of string */
+    if (a != str) {
+        if (*a) {
+            b = a-1;
+            a = str-1;
+            while( (*(++a) = *(++b)) );
+        } else {
+            a = str;
+            *a = 0;
+        }
+    } else {
+        while (*a) ++a;
+    }
+
+    return a;
 }
 
 /**
@@ -470,19 +666,14 @@ gboolean complete(const gchar *text, GtkEntry *entry)
  */
 gboolean readStdin(Application *app)
 {
-    static gchar buf[BUFSIZ];
-    static const gchar *const buf_begin = buf;
+    static gchar buf[BUFSIZ] = "";
     static gchar *bufp = buf;
     static struct timeval stdin_tv = {0,0};
-    const char *filter_text;
-    gboolean selected, visible;
-    int sela, selb;
     fd_set stdin_fds;
-    GtkTreeIter iter;
+    int i;
 
     /* interrupt after reading at most N lines */
-    int i = 0;
-    for( ; i < STDIN_BATCH_SIZE; ++i ) {
+    for( i = 0; i < STDIN_BATCH_SIZE; ++i ) {
         /* check if data available */
         FD_ZERO(&stdin_fds);
         FD_SET(STDIN_FILENO, &stdin_fds);
@@ -490,51 +681,29 @@ gboolean readStdin(Application *app)
             break;
 
         /* read data */
-        if ( fgets(bufp, BUFSIZ - (bufp - buf_begin), stdin) ) {
-            while ( *bufp != '\0' ) ++bufp;
-            /* each line is one item */
-            if ( *(bufp-1) == '\n' ) {
-                *(bufp-1) = '\0';
+        if ( fgets(bufp, BUFSIZ - (bufp - buf), stdin) ) {
+            fprintf(stderr, "[%s], %d\n", buf, (int)(bufp-buf));
+            bufp = append_items(buf, FALSE, app);
+            fprintf(stderr, "  [%s], %d, %d\n", buf, (int)(bufp-buf), (int)*bufp);
 
-                filter_text = gtk_entry_get_text(app->entry);
-                selected = gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), &sela, &selb);
-
-                /** Does in-line completion only if:
-                 * - no text in entry is selected and
-                 * - filter_timer is not set and
-                 * - completion required.
-                 */
-                if ( !selected && !app->filter_timer && app->complete) {
-                    app->filter = FALSE;
-                    complete(buf, app->entry);
-                    app->filter = TRUE;
-                }
-
-                /* first item text to entry (if entry is still empty) */
-                if ( app->insert_first ) {
-                    app->insert_first = TRUE;
-                    if ( !*filter_text ) {
-                        gtk_entry_set_text(app->entry, buf);
-                        gtk_entry_select_region(app->entry, -1, 0);
-                    }
-                }
-
-                /* append new item */
-                visible = match_tokens(buf, filter_text, sela) != NULL;
-                append_item(&iter, buf, visible, app->store);
-
-                /* rewind buffer */
-                bufp = buf;
-            } else if ( bufp >= &buf[BUFSIZ-1] ) {
+            if ( bufp >= &buf[BUFSIZ-1] ) {
                 /** \b FIXME: handle buffer overflow */
-                fprintf(stderr, "Line too big (BUFSIZ is %d)!\n", BUFSIZ);
+                fprintf(stderr, ERR_BUFFER_TOO_SMALL, BUFSIZ);
+                exit(1);
             }
         } else {
             break;
         }
     }
 
-    return !ferror(stdin) && !feof(stdin);
+    if ( ferror(stdin) || feof(stdin) ) {
+        if (buf[0]) {
+            append_items(buf, TRUE,  app);
+        }
+        return FALSE;
+    } else {
+        return TRUE;
+    }
 }
 
 /**
@@ -552,23 +721,65 @@ GtkTreeModel *create_filter(GtkListStore *store)
 }
 
 /**
+ * Appends item to entry.
+ * Items are separated by output separator (\c app->o_separator).
+ */
+void append_item_text( GtkTreeModel *model,
+                       GtkTreePath *path,
+                       GtkTreeIter *iter,
+                       gpointer user_data )
+{
+    Application *app = (Application *)user_data;
+    GtkEntry *entry = app->entry;
+    gchar *item;
+
+    gtk_tree_model_get(model, iter, COL_TEXT, &item, -1);
+    if ( gtk_entry_get_text_length(entry) )
+        gtk_entry_append_text(entry, app->o_separator ? app->o_separator : "");
+    gtk_entry_append_text(entry, item);
+    g_free(item);
+}
+
+/**
  * Handler called if item is selected.
  */
-gboolean item_select(GtkTreeSelection *selection, GtkTreeModel *model,
-        GtkTreePath *path, gboolean path_currently_selected, gpointer data)
+gboolean item_select( GtkTreeSelection *selection,
+                      GtkTreeModel *model,
+                      GtkTreePath *path,
+                      gboolean path_currently_selected,
+                      gpointer user_data )
 {
-    gchar *item;
+    Application *app = (Application *)user_data;
     GtkTreeIter iter;
-    GtkEntry *entry;
+    gchar *sep = app->o_separator;
+    const gchar *a, *b;
+    gint sep_len;
+    const gchar *text = gtk_entry_get_text(app->entry);
+    gint from, to;
 
-    if ( !gtk_tree_model_get_iter(model, &iter, path) )
-        return TRUE;
+    /* delete selection */
+    gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), &from, &to);
+    gtk_entry_buffer_delete_text( gtk_entry_get_buffer(app->entry), from, to );
+
+    /* find beginning of last output item */
+    b = text;
+    if (sep && *sep) {
+        sep_len = strlen(sep);
+        while( (a = strstr(b, sep)) ) {
+            b = a+sep_len;
+        }
+        if (b != text)
+            b -= sep_len;
+    }
 
     /** Changes entry text to item text. */
-    gtk_tree_model_get(model, &iter, COL_TEXT, &item, -1);
-    entry = (GtkEntry *)data;
-    gtk_entry_set_text(entry, item);
-    g_free(item);
+    gtk_entry_buffer_delete_text( gtk_entry_get_buffer(app->entry), b-text, -1);
+    gtk_tree_selection_selected_foreach(selection, append_item_text, app);
+    if ( gtk_tree_model_get_iter(model, &iter, path) &&
+         !gtk_tree_selection_path_is_selected(selection, path) )
+        append_item_text(model, path, &iter, app);
+
+    gtk_entry_select_region(app->entry, b == text ? 0 : b-text+sep_len, -1);
 
     return TRUE;
 }
@@ -584,21 +795,19 @@ gboolean refilter(Application *app)
     GtkTreeModel *model;
     GtkTreeIter iter;
     gchar *item_text;
-    const gchar *filter_text, *a, *b;
-    gboolean selected, visible, filter_visible;
-    int sela, selb;
+    gchar *filter_text, *a, *b;
+    gboolean visible, filter_visible;
+    int from, to;
 
     if (app->filter_timer) {
         g_source_destroy(app->filter_timer);
         app->filter_timer = NULL;
     }
 
-    selected = gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), &sela, &selb);
-    if (selected)
-        return FALSE;
-
+    filter_text = get_filter_text(&from, &to, app);
+    /* do not auto-complete if text is selected */
+    app->complete &= from == to;
     model = GTK_TREE_MODEL(app->store);
-    filter_text = gtk_entry_get_text(app->entry);
 
     /**
      * If last filtered text starts with \a filter_text,
@@ -610,13 +819,14 @@ gboolean refilter(Application *app)
                 ++a, ++b );
         /* filter is same, nothing to do */
         if( !*a && !*b )
-            return;
+            return FALSE;
         filter_visible = *a && !*b;
         g_free(last_filter_text);
     } else {
         filter_visible = FALSE;
     }
-    last_filter_text = g_strdup(filter_text);
+    last_filter_text = filter_text;
+    fprintf(stderr, "%s %d %d\n", filter_text, from, to);
 
     if ( gtk_tree_model_get_iter_first(model, &iter) ) {
         do {
@@ -628,13 +838,11 @@ gboolean refilter(Application *app)
             gtk_tree_model_get(model, &iter, COL_TEXT, &item_text, -1);
             if (item_text) {
                 /* in-line completion */
-                if (app->complete) {
-                    app->filter = FALSE;
-                    app->complete = !complete(item_text, app->entry);
-                    app->filter = TRUE;
+                if ( app->complete && gtk_entry_get_text_length(app->entry) == to ) {
+                    app->complete = !complete(item_text, app);
                 }
 
-                visible = match_tokens(item_text, filter_text, selb) != NULL;
+                visible = match_tokens(item_text, filter_text) != NULL;
                 gtk_list_store_set(app->store, &iter, COL_VISIBLE, visible, -1);
 
                 g_free(item_text);
@@ -645,11 +853,9 @@ gboolean refilter(Application *app)
     return FALSE;
 }
 
-/** Refilter list after \c REFILTER_DELAY milliseconds. */
+/** Refilter list after \c REFILTER_DELAY milliseconds (sets \c app->filter_timer). */
 void delayed_refilter(Application *app)
 {
-    app->insert_first = FALSE;
-
     if (app->filter_timer)
         g_source_destroy(app->filter_timer);
     app->filter_timer = g_timeout_source_new(REFILTER_DELAY);
@@ -706,17 +912,18 @@ GtkTreeView *create_list_view(GtkTreeModel *model)
     /* icon column */
     renderer = gtk_cell_renderer_pixbuf_new();
     gtk_tree_view_column_pack_start(col, renderer, FALSE);
-    gtk_tree_view_column_set_attributes(col, renderer,
-                                        "pixbuf", COL_ICON,
-                                        NULL);
+    gtk_tree_view_column_set_attributes( col, renderer,
+                                         "pixbuf", COL_ICON,
+                                         NULL );
 
     /* text column */
     renderer = gtk_cell_renderer_text_new();
+    /** If text is too long, display dots in middle. */
     g_object_set(renderer, "ellipsize", PANGO_ELLIPSIZE_MIDDLE, NULL);
     gtk_tree_view_column_pack_start(col, renderer, TRUE);
-    gtk_tree_view_column_set_attributes(col, renderer,
-                                        "text", COL_TEXT,
-                                        NULL);
+    gtk_tree_view_column_set_attributes( col, renderer,
+                                         "text", COL_TEXT,
+                                         NULL );
 
     gtk_tree_view_append_column(tree_view, col);
 
@@ -785,21 +992,16 @@ int main(int argc, char *argv[])
     Application app;
 
     /* options */
-    options.title = "sprinter";
-    options.label = "select:";
-    options.hide_list = options.sort_list = options.strict = FALSE;
-    options.x = options.y = OPTION_UNSET;
-    options.width  = DEFAULT_WINDOW_WIDTH;
-    options.height = DEFAULT_WINDOW_HEIGHT;
-
     set_options(argc, argv, &options);
 
+    /* init application */
+    gtk_init(&argc, &argv);
+
     app.complete = TRUE;
-    app.insert_first = TRUE;
     app.filter_timer = NULL;
     app.hide_list = options.hide_list;
-
-    gtk_init(&argc, &argv);
+    app.i_separator = options.i_separator;
+    app.o_separator = options.o_separator;
 
     /** Creates main window and widgets. */
     /* main window */
@@ -827,6 +1029,12 @@ int main(int argc, char *argv[])
     app.tree_view = create_list_view(model);
     g_object_unref(model);
 
+    /* multiple selections only if output separator set */
+    if (app.o_separator) {
+        gtk_tree_selection_set_mode( gtk_tree_view_get_selection(app.tree_view),
+                                     GTK_SELECTION_MULTIPLE );
+    }
+
     /* scrolled window for item list */
     app.scroll_window = GTK_SCROLLED_WINDOW( gtk_scrolled_window_new(NULL, NULL) );
     gtk_scrolled_window_set_policy( app.scroll_window,
@@ -843,7 +1051,7 @@ int main(int argc, char *argv[])
     /* on item selected */
     gtk_tree_selection_set_select_function(
             gtk_tree_view_get_selection(app.tree_view),
-            item_select, app.entry, NULL
+            item_select, &app, NULL
     );
 
     /* lay out widgets */
