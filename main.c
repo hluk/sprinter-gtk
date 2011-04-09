@@ -1,5 +1,23 @@
 /**
  * \file main.c
+ *
+ * Function #main is called at start.
+ *
+ * Program arguments are parsed using #new_options.
+ *
+ * Main window, widgets are created and state initialized (see #Application)
+ * using #new_application.
+ *
+ * Control is passed to GTK main event loop from which #readStdin is called
+ * every time the application is idle and stdin is open. This function parses
+ * items from stdin.
+ *
+ * After main event loop finishes, program prints contents of text entry and
+ * exits with exit code 0 if the text was submitted. Otherwise application
+ * doesn't print anything on stdout and exits with exit code 1.
+ *
+ * If wrong arguments are passed to application or other error occurred
+ * during execution, the program exits with exit code 2.
  */
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
@@ -13,7 +31,8 @@
 
 
 /** buffer too small error string */
-#define ERR_BUFFER_TOO_SMALL "Line too big (BUFSIZ is %d)! Maybe the input separator (-i) is wrong.\n"
+#define ERR_BUFFER_TOO_SMALL "Line too big (BUFSIZ is %d)!"\
+    " Try changing the input separator using option -i.\n"
 
 /**
  * Maximum number of input reads before the control is
@@ -23,7 +42,7 @@
  */
 #define STDIN_BATCH_SIZE 20
 
-/** Delay list refiltering for \c REFILTER_DELAY milliseconds. */
+/** Delay list refiltering for #REFILTER_DELAY milliseconds. */
 #define REFILTER_DELAY 200
 
 /**\{ \name Default option values */
@@ -86,6 +105,9 @@ typedef struct {
     char *i_separator;
     /** output separator*/
     char *o_separator;
+
+    /** exit code for program */
+    int exit_code;
 } Application;
 
 /** program arguments */
@@ -135,9 +157,9 @@ typedef struct {
     gboolean show_help;
     /** Hide list initially (minimal mode). */
     gboolean hide_list;
-    /** \b TODO: Sort list. */
+    /** \todo Sort list. */
     gboolean sort_list;
-    /** \b TODO: If entry text submitted, check if item with same text exists. */
+    /** \todo If entry text submitted, check if item with same text exists. */
     gboolean strict;
 
     /** input separator*/
@@ -274,7 +296,7 @@ Options new_options(int argc, char *argv[])
             }
             ++i;
 
-            /** \b TODO: better parsing of geometry values */
+            /** \todo better parsing of geometry values */
             /* width,height,x,y - all optional */
             /* width */
             num2 = sscanf(argp, "%d%c", &num, &c);
@@ -417,8 +439,8 @@ gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
             case GDK_KEY_KP_Enter:
             case GDK_KEY_Return:
                 g_print( gtk_entry_get_text(app->entry) );
+                app->exit_code = 0;
                 gtk_main_quit();
-                exit(0);
                 return TRUE;
             /**
              * If tab or down key pressed and entry widget has focus,
@@ -426,6 +448,7 @@ gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
              */
             case GDK_KEY_Tab:
             case GDK_KEY_Down:
+            case GDK_KEY_Page_Down:
                 if ( gtk_widget_has_focus(GTK_WIDGET(app->entry)) ) {
                     if (app->hide_list)
                         show_list(app);
@@ -463,8 +486,11 @@ gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 /** list view key-press-event handler */
 gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 {
+    guint key = event->key.keyval;
+
     /** If at top of the list and up key pressed, focus entry. */
-    if (event->type == GDK_KEY_PRESS && event->key.keyval == GDK_KEY_Up){
+    if (event->type == GDK_KEY_PRESS &&
+            (key == GDK_KEY_Up || key == GDK_KEY_Page_Up) ){
         GtkTreePath *path;
         gtk_tree_view_get_cursor( GTK_TREE_VIEW(widget), &path, NULL );
         if (path) {
@@ -624,8 +650,8 @@ gchar *get_filter_text(gint *from, gint *to, Application *app)
 
 /**
  * Appends items to list.
- * Appends all items in \a str separated by input separator (\c app->i_separator).
- * Last item is addad only if \a last is \c TRUE.
+ * Appends all items in \a str separated by input separator (Application::i_separator).
+ * Last item is added only if \a last is \c TRUE.
  * \callgraph
  */
 char *append_items(char *str, gboolean last, Application *app)
@@ -656,7 +682,7 @@ char *append_items(char *str, gboolean last, Application *app)
          * Does in-line completion only for last output item and only if:
          * - no text in entry is selected and
          * - text cursor is at the end of entry and
-         * - \c app->complete is \c TRUE.
+         * - Application::complete is \c TRUE.
          */
         if ( app->complete && visible && !app->filter_timer &&
                 gtk_entry_get_text_length(app->entry) == to ) {
@@ -693,8 +719,8 @@ char *append_items(char *str, gboolean last, Application *app)
 }
 
 /**
- * Read standard input.
- * Read few lines from standard input.
+ * Read items from standard input.
+ * After maximum of #STDIN_BATCH_SIZE passes control back to main event loop.
  * If the whole input is read the application may be unresponsive for some time.
  * \return TRUE if no error occurred and input isn't at end
  * \callgraph
@@ -720,9 +746,11 @@ gboolean readStdin(Application *app)
             bufp = append_items(buf, FALSE, app);
 
             if ( bufp >= &buf[BUFSIZ-1] ) {
-                /** \b FIXME: handle buffer overflow */
+                /** \bug Doesn't handle buffer overflow. */
                 g_printerr(ERR_BUFFER_TOO_SMALL, BUFSIZ);
-                exit(1);
+                app->exit_code = 2;
+                gtk_main_quit();
+                return FALSE;
             }
         } else {
             break;
@@ -730,9 +758,8 @@ gboolean readStdin(Application *app)
     }
 
     if ( ferror(stdin) || feof(stdin) ) {
-        if (buf[0]) {
+        if (buf[0])
             append_items(buf, TRUE,  app);
-        }
         return FALSE;
     } else {
         return TRUE;
@@ -741,7 +768,7 @@ gboolean readStdin(Application *app)
 
 /**
  * Create filtered model from list store.
- * Items are filtered using \c COL_VISIBLE column.
+ * Items are filtered using #COL_VISIBLE column.
  */
 GtkTreeModel *create_filter(GtkListStore *store)
 {
@@ -755,7 +782,7 @@ GtkTreeModel *create_filter(GtkListStore *store)
 
 /**
  * Appends item to entry.
- * Items are separated by output separator (\c app->o_separator).
+ * Items are separated by output separator (Application::o_separator).
  */
 void append_item_text( GtkTreeModel *model,
                        GtkTreePath *path,
@@ -767,7 +794,10 @@ void append_item_text( GtkTreeModel *model,
     gchar *item;
 
     gtk_tree_model_get(model, iter, COL_TEXT, &item, -1);
-    /** \b FIXME: \n separator doesn't show correctly */
+    /**
+     * \bug Separator with new line character (\\n)
+     * doesn't show correctly in entry.
+     */
     if ( gtk_entry_get_text_length(entry) )
         gtk_entry_append_text(entry, app->o_separator ? app->o_separator : "");
     gtk_entry_append_text(entry, item);
@@ -886,7 +916,7 @@ gboolean refilter(Application *app)
     return FALSE;
 }
 
-/** Refilter list after \c REFILTER_DELAY milliseconds (sets \c app->filter_timer). */
+/** Refilter list after #REFILTER_DELAY milliseconds (sets Application::filter_timer). */
 void delayed_refilter(Application *app)
 {
     if (app->filter_timer)
@@ -1035,6 +1065,7 @@ Application *new_application(const Options *options)
     app->hide_list = options->hide_list;
     app->i_separator = options->i_separator;
     app->o_separator = options->o_separator;
+    app->exit_code = 1;
 
     /** Creates: */
     /** - main window, */
@@ -1118,26 +1149,28 @@ int main(int argc, char *argv[])
 {
     Options options;
     Application *app;
+    int exit_code;
 
-    /* options */
+    /** Parses options from program arguments. */
     options = new_options(argc, argv);
     if (options.show_help) {
         help();
         return 0;
     } else if (!options.ok) {
-        return 1;
+        return 2;
     }
 
-    /* init application */
+    /** Initializes application and shows main window. */
     gtk_init(&argc, &argv);
 
     app = new_application(&options);
 
     gtk_main();
 
+    exit_code = app->exit_code;
     free(app);
 
     /** \return exit code is 0 only if an item was submitted */
-    return 1;
+    return exit_code;
 }
 
