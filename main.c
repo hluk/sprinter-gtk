@@ -1,4 +1,5 @@
-/** \file main.c
+/**
+ * \file main.c
  */
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
@@ -12,26 +13,33 @@
 
 
 /** buffer too small error string */
-#define ERR_BUFFER_TOO_SMALL "Line too big (BUFSIZ is %d)!\n"
+#define ERR_BUFFER_TOO_SMALL "Line too big (BUFSIZ is %d)! Maybe the input separator (-i) is wrong.\n"
 
 /**
- * maximum number of input reads until control is
- * returned to main event loop
+ * Maximum number of input reads before the control is
+ * returned to main event loop.
+ * Other values might lead to better or worse responsiveness
+ * while reading lot of data from stdin.
  */
 #define STDIN_BATCH_SIZE 20
 
 /** Delay list refiltering for \c REFILTER_DELAY milliseconds. */
 #define REFILTER_DELAY 200
 
+/**\{ \name Default option values */
+/** default window title */
+#define DEFAULT_TITLE "sprinter"
+/** default label */
+#define DEFAULT_LABEL "select:"
 /** default input separator */
 #define DEFAULT_INPUT_SEPARATOR "\n"
 /** default output separator */
 #define DEFAULT_OUTPUT_SEPARATOR NULL
-
 /** default window width */
 #define DEFAULT_WINDOW_WIDTH 230
 /** default window height */
 #define DEFAULT_WINDOW_HEIGHT 320
+/**\}*/
 
 /** columns in list store */
 enum
@@ -46,7 +54,7 @@ enum
     NUM_COLS
 };
 
-/** main window, widgets and current state of application */
+/** main window, widgets and current state */
 typedef struct {
     /** main window */
     GtkWindow *window;
@@ -107,26 +115,24 @@ const Argument arguments[] = {
 #define HELP_HEADER ("usage: sprinter [options]\noptions:\n")
 
 /** undefined value for an option */
-#define OPTION_UNSET -99999
+#define OPTION_UNSET -65535
 
 /** user options (using arguments passed to program at start) */
 typedef struct {
     /** main window title */
     const char *title;
-
-    /**\{ \name Main window geometry */
-    /** X position */
-    gint x,
-    /** Y position */
-        y,
-    /** width */
-        width,
-    /** height */
-        height;
-    /**\}*/
-
     /** entry label text */
     const char *label;
+
+    /**\{ \name Main window geometry */
+    gint x,      /**< X position */
+         y,      /**< Y position */
+         width,  /**< width */
+         height; /**< height */
+    /**\}*/
+
+    /** help requested */
+    gboolean show_help;
     /** Hide list initially (minimal mode). */
     gboolean hide_list;
     /** \b TODO: Sort list. */
@@ -138,21 +144,23 @@ typedef struct {
     char *i_separator;
     /** output separator*/
     char *o_separator;
+
+    /** options correctly parsed */
+    gboolean ok;
 } Options;
 
 /** Print help and exit. */
-void help(int exit_code) {
+void help() {
     int len, i;
     const Argument *arg;
 
-    printf(HELP_HEADER);
+    g_print(HELP_HEADER);
 
     len = sizeof(arguments)/sizeof(Argument);
     for ( i = 0; i<len; ++i ) {
         arg = &arguments[i];
-        printf( "  -%c, --%-12s %s\n", arg->shopt, arg->opt, arg->help );
+        g_print( "  -%c, --%-12s %s\n", arg->shopt, arg->opt, arg->help );
     }
-    exit(exit_code);
 }
 
 /**
@@ -184,32 +192,33 @@ gchar *unescape(const gchar *str)
         }
     }
     *r = 0;
-    printf("|%s|\n ", result);
 
     return result;
 }
 
 /**
- * Sets options for application.
- * Sets \a options accordingly to arguments passed to program.
+ * Creates options for application.
+ * Creates \a options and sets it accordingly to arguments passed to program.
  */
-void set_options(int argc, char *argv[], Options *options)
+Options new_options(int argc, char *argv[])
 {
     int num, num2;
     gboolean force_arg;
     char *argp;
     char c, arg;
     int i, j, len;
+    Options options;
 
     /* default options */
-    options->title = "sprinter";
-    options->label = "select:";
-    options->hide_list = options->sort_list = options->strict = FALSE;
-    options->x = options->y = OPTION_UNSET;
-    options->width  = DEFAULT_WINDOW_WIDTH;
-    options->height = DEFAULT_WINDOW_HEIGHT;
-    options->i_separator = DEFAULT_INPUT_SEPARATOR;
-    options->o_separator = DEFAULT_OUTPUT_SEPARATOR;
+    options.title = DEFAULT_TITLE;
+    options.label = DEFAULT_LABEL;
+    options.show_help = options.hide_list =
+        options.sort_list = options.strict = FALSE;
+    options.x = options.y = OPTION_UNSET;
+    options.width  = DEFAULT_WINDOW_WIDTH;
+    options.height = DEFAULT_WINDOW_HEIGHT;
+    options.i_separator = DEFAULT_INPUT_SEPARATOR;
+    options.o_separator = DEFAULT_OUTPUT_SEPARATOR;
 
     len = sizeof(arguments)/sizeof(Argument);
     i = 1;
@@ -218,8 +227,8 @@ void set_options(int argc, char *argv[], Options *options)
         ++i;
 
         if (argp[0] != '-' || argp[1] == '\0') {
-            help(1);
-            return;
+            help();
+            break;
         }
 
         j = 0;
@@ -251,90 +260,116 @@ void set_options(int argc, char *argv[], Options *options)
         }
 
         if ( j == len ) {
-            help(1);
-            return;
+            help();
+            break;
         }
 
-        /* do action */
+        /* set options */
         arg = arguments[j].shopt;
+        j = i;
         if (arg == 'g') {
-            if (!argp) help(1);
+            if (!argp) {
+                help();
+                break;
+            }
             ++i;
 
+            /** \b TODO: better parsing of geometry values */
             /* width,height,x,y - all optional */
             /* width */
             num2 = sscanf(argp, "%d%c", &num, &c);
             if (num2 > 0 && num > 0)
-                options->width = num;
+                options.width = num;
 
             while( isdigit(*argp) || *argp=='+' ) ++argp;
-            if (*argp == ',')
+            if (*argp == ',') {
                 ++argp;
-            else if (*argp != '\0')
-                help(1);
+            } else if (*argp != '\0') {
+                help();
+                break;
+            }
 
             /* height */
             num2 = sscanf(argp, "%d", &num);
             if (num2 > 0 && num > 0)
-                options->height = num;
+                options.height = num;
 
             while( isdigit(*argp) || *argp=='+' ) ++argp;
-            if (*argp == ',')
+            if (*argp == ',') {
                 ++argp;
-            else if (*argp != '\0')
-                help(1);
+            } else if (*argp != '\0') {
+                help();
+                break;
+            }
 
             /* x */
             num2 = sscanf(argp, "%d", &num);
             if (num2 > 0)
-                options->x = num;
+                options.x = num;
 
             while( isdigit(*argp) || *argp=='+' || *argp=='-' ) ++argp;
-            if (*argp == ',')
+            if (*argp == ',') {
                 ++argp;
-            else if (*argp != '\0')
-                help(1);
+            } else if (*argp != '\0') {
+                help();
+                break;
+            }
 
             /* y */
             num2 = sscanf(argp, "%d", &num);
             if (num2 > 0)
-                options->y = num;
+                options.y = num;
 
             while( isdigit(*argp) || *argp=='+' || *argp=='-' ) ++argp;
-            if (*argp != '\0')
-                help(1);
+            if (*argp != '\0') {
+                help();
+                break;
+            }
         } else if (arg == 'h') {
-            if (force_arg) help(1);
-            help(0);
+            options.show_help = TRUE;
+            break;
         } else if (arg == 'i') {
-            if (!argp) help(1);
+            if (!argp) {
+                help();
+                break;
+            }
             ++i;
-            options->i_separator = unescape(argp);
+            options.i_separator = unescape(argp);
         } else if (arg == 'l') {
             if (!argp) help(1);
             ++i;
-            options->label = argp;
+            options.label = argp;
         } else if (arg == 'm') {
-            if (force_arg) help(1);
-            options->hide_list = TRUE;
+            options.hide_list = TRUE;
         } else if (arg == 'o') {
             if (!argp) help(1);
             ++i;
-            options->o_separator = unescape(argp);
+            options.o_separator = unescape(argp);
         } else if (arg == 's') {
-            if (force_arg) help(1);
-            options->sort_list = TRUE;
+            options.sort_list = TRUE;
         } else if (arg == 'S') {
-            if (force_arg) help(1);
-            options->strict = TRUE;
+            options.strict = TRUE;
         } else if (arg == 't') {
-            if (!argp) help(1);
+            if (!argp) {
+                help();
+                break;
+            }
             ++i;
-            options->title = argp;
+            options.title = argp;
         } else {
-            help(1);
+            help();
+            break;
+        }
+
+        if (force_arg && i == j) {
+            help();
+            break;
         }
     }
+
+    options.ok = i == argc;
+
+    return options;
 }
 
 
@@ -682,13 +717,11 @@ gboolean readStdin(Application *app)
 
         /* read data */
         if ( fgets(bufp, BUFSIZ - (bufp - buf), stdin) ) {
-            fprintf(stderr, "[%s], %d\n", buf, (int)(bufp-buf));
             bufp = append_items(buf, FALSE, app);
-            fprintf(stderr, "  [%s], %d, %d\n", buf, (int)(bufp-buf), (int)*bufp);
 
             if ( bufp >= &buf[BUFSIZ-1] ) {
                 /** \b FIXME: handle buffer overflow */
-                fprintf(stderr, ERR_BUFFER_TOO_SMALL, BUFSIZ);
+                g_printerr(ERR_BUFFER_TOO_SMALL, BUFSIZ);
                 exit(1);
             }
         } else {
@@ -734,6 +767,7 @@ void append_item_text( GtkTreeModel *model,
     gchar *item;
 
     gtk_tree_model_get(model, iter, COL_TEXT, &item, -1);
+    /** \b FIXME: \n separator doesn't show correctly */
     if ( gtk_entry_get_text_length(entry) )
         gtk_entry_append_text(entry, app->o_separator ? app->o_separator : "");
     gtk_entry_append_text(entry, item);
@@ -826,7 +860,6 @@ gboolean refilter(Application *app)
         filter_visible = FALSE;
     }
     last_filter_text = filter_text;
-    fprintf(stderr, "%s %d %d\n", filter_text, from, to);
 
     if ( gtk_tree_model_get_iter_first(model, &iter) ) {
         do {
@@ -929,11 +962,12 @@ GtkTreeView *create_list_view(GtkTreeModel *model)
 
     gtk_tree_view_set_search_column(tree_view, COL_TEXT);
     gtk_tree_view_set_headers_visible(tree_view, FALSE);
+
     /**
-     * For performance reasons each row has fixed height
-     * (\e gtk_tree_view_set_fixed_height_mode()) and
-     * tree lines are hidden (\e gtk_tree_view_set_enable_tree_lines()).
+     * For performance reasons rows have fixed height and
+     * tree lines are hidden.
      */
+    gtk_tree_view_column_set_sizing(col, GTK_TREE_VIEW_COLUMN_FIXED);
     gtk_tree_view_set_fixed_height_mode(tree_view, TRUE);
     gtk_tree_view_set_enable_tree_lines(tree_view, FALSE);
 
@@ -941,7 +975,7 @@ GtkTreeView *create_list_view(GtkTreeModel *model)
 }
 
 /** Sets window geometry using \a options */
-void set_window_geometry(Options *options, Application *app)
+void set_window_geometry(const Options *options, Application *app)
 {
     gint x ,y;
     GdkGravity gravity;
@@ -956,27 +990,125 @@ void set_window_geometry(Options *options, Application *app)
     /* moves window */
     if (options->x != OPTION_UNSET || options->y != OPTION_UNSET) {
         gtk_window_get_position( app->window, &x, &y );
-        if (options->x == OPTION_UNSET)
-            options->x = x;
-        else if (options->y == OPTION_UNSET)
-            options->y = y;
-        if (options->x < 0) {
-            if (options->y < 0) {
+        if (options->x != OPTION_UNSET)
+            x = options->x;
+        if (options->y != OPTION_UNSET)
+            y = options->y;
+
+        if (x < 0) {
+            if (y < 0) {
                 gravity = GDK_GRAVITY_SOUTH_EAST;
-                options->y = gdk_screen_height() + options->y + 1;
+                y = gdk_screen_height() + y + 1;
             } else {
                 gravity = GDK_GRAVITY_NORTH_EAST;
             }
-            options->x = gdk_screen_width() + options->x;
-        } else if (options->y < 0) {
+            x = gdk_screen_width() + x;
+        } else if (y < 0) {
             gravity = GDK_GRAVITY_SOUTH_WEST;
-            options->y = gdk_screen_height() + options->y + 1;
+            y = gdk_screen_height() + y + 1;
         } else {
             gravity = GDK_GRAVITY_NORTH_WEST;
         }
+
         gtk_window_set_gravity( app->window, gravity );
-        gtk_window_move( app->window, options->x, options->y );
+        gtk_window_move( app->window, x, y );
     }
+}
+
+/**
+ * Creates main window with widgets.
+ * Uses \a options to pass user options to application.
+ * \callgraph
+ */
+Application *new_application(const Options *options)
+{
+    Application *app;
+    GtkWidget *layout;
+    GtkWidget *hbox;
+    GdkPixbuf *pixbuf;
+    GtkTreeModel *model;
+
+    app = malloc( sizeof(Application) );
+
+    app->complete = TRUE;
+    app->filter_timer = NULL;
+    app->hide_list = options->hide_list;
+    app->i_separator = options->i_separator;
+    app->o_separator = options->o_separator;
+
+    /** Creates: */
+    /** - main window, */
+    app->window = GTK_WINDOW( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
+    gtk_window_set_title( app->window, options->title );
+    /*gtk_window_set_icon_from_file( app->window, "sprinter.svg", NULL );*/
+    pixbuf = gdk_pixbuf_new_from_inline(-1, sprinter_icon, FALSE, NULL);
+    gtk_window_set_icon( app->window, pixbuf );
+
+    /** - text entry, */
+    app->entry = GTK_ENTRY( gtk_entry_new() );
+    app->label = GTK_LABEL( gtk_label_new(options->label) );
+
+    /** - list store and filtered model, */
+    app->store = gtk_list_store_new( 3,
+                    G_TYPE_BOOLEAN,
+                    GDK_TYPE_PIXBUF,
+                    G_TYPE_STRING );
+    model = create_filter(app->store);
+
+    /* appends lines from stdin to list store */
+    g_idle_add( (GSourceFunc)readStdin, app );
+
+    /** - list view, */
+    app->tree_view = create_list_view(model);
+    g_object_unref(model);
+
+    /* multiple selections only if output separator set */
+    if (app->o_separator) {
+        gtk_tree_selection_set_mode( gtk_tree_view_get_selection(app->tree_view),
+                                     GTK_SELECTION_MULTIPLE );
+    }
+
+    /** - scrolled window for item list. */
+    app->scroll_window = GTK_SCROLLED_WINDOW( gtk_scrolled_window_new(NULL, NULL) );
+    gtk_scrolled_window_set_policy( app->scroll_window,
+            GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC );
+
+    /* signals */
+    g_signal_connect(app->window, "destroy", G_CALLBACK(destroy), NULL);
+    g_signal_connect(app->window, "key-press-event", G_CALLBACK(on_key_press), app);
+    g_signal_connect(app->tree_view, "key-press-event", G_CALLBACK(tree_view_on_key_press), app);
+    /*g_signal_connect(app->entry, "changed", G_CALLBACK(entry_changed), app);*/
+    g_signal_connect(app->entry, "insert-text", G_CALLBACK(insert_text), app);
+    g_signal_connect(app->entry, "delete-text", G_CALLBACK(delete_text), app);
+
+    /* on item selected */
+    gtk_tree_selection_set_select_function(
+            gtk_tree_view_get_selection(app->tree_view),
+            item_select, app, NULL
+    );
+
+    /* lay out widgets */
+    layout = gtk_vbox_new(FALSE, 2);
+    hbox = gtk_hbox_new(FALSE, 2);
+    /*gtk_container_set_border_width( GTK_CONTAINER(window), 2 );*/
+    gtk_container_add( GTK_CONTAINER(app->window), layout );
+    gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app->label), 0,1,0 );
+    gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app->entry), 1,1,0 );
+    gtk_box_pack_start( GTK_BOX(layout), hbox, 0,1,0 );
+    gtk_box_pack_start( GTK_BOX(layout), GTK_WIDGET(app->scroll_window), 1,1,0 );
+    gtk_container_add( GTK_CONTAINER(app->scroll_window), GTK_WIDGET(app->tree_view) );
+
+    /* window position and size */
+    set_window_geometry(options, app);
+
+    gtk_widget_show_all( GTK_WIDGET(app->window) );
+    if (app->hide_list) {
+        hide_list(NULL, NULL, app);
+        g_signal_connect( app->tree_view, "focus-out-event",
+                          G_CALLBACK(hide_list), app );
+    }
+
+    return app;
 }
 
 /**
@@ -984,98 +1116,26 @@ void set_window_geometry(Options *options, Application *app)
  */
 int main(int argc, char *argv[])
 {
-    GtkWidget *layout;
-    GtkWidget *hbox;
-    GdkPixbuf *pixbuf;
-    GtkTreeModel *model;
     Options options;
-    Application app;
+    Application *app;
 
     /* options */
-    set_options(argc, argv, &options);
+    options = new_options(argc, argv);
+    if (options.show_help) {
+        help();
+        return 0;
+    } else if (!options.ok) {
+        return 1;
+    }
 
     /* init application */
     gtk_init(&argc, &argv);
 
-    app.complete = TRUE;
-    app.filter_timer = NULL;
-    app.hide_list = options.hide_list;
-    app.i_separator = options.i_separator;
-    app.o_separator = options.o_separator;
-
-    /** Creates main window and widgets. */
-    /* main window */
-    app.window = GTK_WINDOW( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
-    gtk_window_set_title( app.window, options.title );
-    /*gtk_window_set_icon_from_file( app.window, "sprinter.svg", NULL );*/
-    pixbuf = gdk_pixbuf_new_from_inline(-1, sprinter_icon, FALSE, NULL);
-    gtk_window_set_icon( app.window, pixbuf );
-
-    /* text entry */
-    app.entry = GTK_ENTRY( gtk_entry_new() );
-    app.label = GTK_LABEL( gtk_label_new(options.label) );
-
-    /* list store and filtered model */
-    app.store = gtk_list_store_new( 3,
-                    G_TYPE_BOOLEAN,
-                    GDK_TYPE_PIXBUF,
-                    G_TYPE_STRING );
-    model = create_filter(app.store);
-
-    /* appends lines from stdin to list store */
-    g_idle_add( (GSourceFunc)readStdin, &app );
-
-    /* list view */
-    app.tree_view = create_list_view(model);
-    g_object_unref(model);
-
-    /* multiple selections only if output separator set */
-    if (app.o_separator) {
-        gtk_tree_selection_set_mode( gtk_tree_view_get_selection(app.tree_view),
-                                     GTK_SELECTION_MULTIPLE );
-    }
-
-    /* scrolled window for item list */
-    app.scroll_window = GTK_SCROLLED_WINDOW( gtk_scrolled_window_new(NULL, NULL) );
-    gtk_scrolled_window_set_policy( app.scroll_window,
-            GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC );
-
-    /* signals */
-    g_signal_connect(app.window, "destroy", G_CALLBACK(destroy), NULL);
-    g_signal_connect(app.window, "key-press-event", G_CALLBACK(on_key_press), &app);
-    g_signal_connect(app.tree_view, "key-press-event", G_CALLBACK(tree_view_on_key_press), &app);
-    /*g_signal_connect(app.entry, "changed", G_CALLBACK(entry_changed), &app);*/
-    g_signal_connect(app.entry, "insert-text", G_CALLBACK(insert_text), &app);
-    g_signal_connect(app.entry, "delete-text", G_CALLBACK(delete_text), &app);
-
-    /* on item selected */
-    gtk_tree_selection_set_select_function(
-            gtk_tree_view_get_selection(app.tree_view),
-            item_select, &app, NULL
-    );
-
-    /* lay out widgets */
-    layout = gtk_vbox_new(FALSE, 2);
-    hbox = gtk_hbox_new(FALSE, 2);
-    /*gtk_container_set_border_width( GTK_CONTAINER(window), 2 );*/
-    gtk_container_add( GTK_CONTAINER(app.window), layout );
-    gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app.label), 0,1,0 );
-    gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app.entry), 1,1,0 );
-    gtk_box_pack_start( GTK_BOX(layout), hbox, 0,1,0 );
-    gtk_box_pack_start( GTK_BOX(layout), GTK_WIDGET(app.scroll_window), 1,1,0 );
-    gtk_container_add( GTK_CONTAINER(app.scroll_window), GTK_WIDGET(app.tree_view) );
-
-    /* window position and size*/
-    set_window_geometry(&options, &app);
-
-    gtk_widget_show_all( GTK_WIDGET(app.window) );
-    if (app.hide_list) {
-        hide_list(NULL, NULL, &app);
-        g_signal_connect( app.tree_view, "focus-out-event",
-                          G_CALLBACK(hide_list), &app );
-    }
+    app = new_application(&options);
 
     gtk_main();
+
+    free(app);
 
     /** \return exit code is 0 only if an item was submitted */
     return 1;
