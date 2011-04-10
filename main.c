@@ -10,16 +10,19 @@
  *
  * Control is passed to GTK main event loop from which #readStdin is called
  * every time the application is idle and stdin is open. This function parses
- * items from stdin.
+ * items from stdin. Function is interrupted after reading at most
+ * #STDIN_BATCH_SIZE characters (changing value #STDIN_BATCH_SIZE may improve
+ * responsiveness).
  *
  * After main event loop finishes, program prints contents of text entry and
  * exits with exit code 0 if the text was submitted. Otherwise application
  * doesn't print anything on stdout and exits with exit code 1.
  *
- * If wrong arguments are passed to application or other error occurred
+ * If wrong arguments were passed to application or other error occurred
  * during execution, the program exits with exit code 2.
  */
 #include <gtk/gtk.h>
+#include <gdk/gdk.h>
 #include <gdk/gdkkeysyms.h>
 
 #include <stdio.h>
@@ -30,26 +33,53 @@
 #include "sprinter_icon.h"
 
 
+/** header for help (\c --help option)*/
+#define HELP_HEADER ("usage: sprinter [options]\noptions:\n")
+
+/** geometry help */
+#define HELP_GEOMETRY \
+"Window geometry can be changed with -g option which takes single argument.\n" \
+"Argument format is either W[xH[X[Y]]] or [H]XY where W is width, H is height\n" \
+"X is horizontal position and Y is vertical position.\n" \
+"\n" \
+"If width or height is negative, window width or height will be maximal.\n" \
+"\n" \
+"If horizontal or vertical position is negative, window is moved from right or\n" \
+"bottom screen edge.\n" \
+"\n" \
+"If two numbers are immediately next to each other, second number must\n" \
+"have a sign (+ or -).\n" \
+"\n" \
+"Examples:\n" \
+"   200x600  Window height is 200 pixels, width is 600 pixels and position is\n" \
+"            at center of the screen.\n" \
+"       0+0  Window is placed at the top left screen corner.\n" \
+"      -1-1  Window is placed at the bottom right screen corner.\n" \
+"    -1-1-1  Window has maximal height and is placed at the right screen edge.\n" \
+"    -1+0+0  Window has maximal height and is placed at the left screen edge.\n" \
+"  -1x1+0-1  Window has maximal width and minimal height and is placed at\n" \
+"            the bottom screen edge.\n"
+
 /** buffer too small error string */
-#define ERR_BUFFER_TOO_SMALL "Line too big (BUFSIZ is %d)!"\
+#define ERR_BUFFER_TOO_SMALL "Item text is too long (BUFSIZ is %d)!"\
     " Try changing the input separator using option -i.\n"
 
 /**
- * Maximum number of input reads before the control is
+ * Maximum number of characters read from input before the control is
  * returned to main event loop.
  * Other values might lead to better or worse responsiveness
  * while reading lot of data from stdin.
  */
-#define STDIN_BATCH_SIZE 20
+#define STDIN_BATCH_SIZE 250
 
-/** Delay list refiltering for #REFILTER_DELAY milliseconds. */
+/** delay (in milliseconds) for list refiltering */
 #define REFILTER_DELAY 200
 
 /**\{ \name Default option values */
 /** default window title */
 #define DEFAULT_TITLE "sprinter"
 /** default label */
-#define DEFAULT_LABEL "select:"
+#define DEFAULT_LABEL "submit"
 /** default input separator */
 #define DEFAULT_INPUT_SEPARATOR "\n"
 /** default output separator */
@@ -77,8 +107,8 @@ enum
 typedef struct {
     /** main window */
     GtkWindow *window;
-    /** text entry label with custom text */
-    GtkLabel *label;
+    /** button (with custom label) to submit text */
+    GtkButton *button;
     /** text entry */
     GtkEntry *entry;
     /** item list */
@@ -122,19 +152,16 @@ typedef struct {
 
 /** program options (short, long, description) */
 const Argument arguments[] = {
-    {'g', "geometry", "window size and position (format: width,height,[-]x,[-]y)"},
-    {'h', "help",     "show this help"},
-    {'i', "input-separator",  "string which separates items on input"},
-    {'l', "label",    "text input label"},
-    {'m', "minimal",  "hide list (press TAB key to show the list)"},
+    {'g', "geometry",          "window size and position"},
+    {'h', "help",              "show this help"},
+    {'i', "input-separator",   "string which separates items on input"},
+    {'l', "label",             "text input label"},
+    {'m', "minimal",           "hide list (press TAB key to show the list)"},
     {'o', "output-separator",  "string which separates items on output"},
-    /*{'s', "sort",     "sort items alphabetically"},*/
-    /*{'S', "strict",   "choose only items from stdin"},*/
-    {'t', "title",    "title"}
+    /*{'s', "sort",              "sort items alphabetically"},*/
+    /*{'S', "strict",            "choose only items from stdin"},*/
+    {'t', "title",             "title"}
 };
-
-/** header for help (\c --help option)*/
-#define HELP_HEADER ("usage: sprinter [options]\noptions:\n")
 
 /** undefined value for an option */
 #define OPTION_UNSET -65535
@@ -171,8 +198,9 @@ typedef struct {
     gboolean ok;
 } Options;
 
-/** Print help and exit. */
-void help() {
+/** Prints help. */
+void help()
+{
     int len, i;
     const Argument *arg;
 
@@ -183,6 +211,12 @@ void help() {
         arg = &arguments[i];
         g_print( "  -%c, --%-12s %s\n", arg->shopt, arg->opt, arg->help );
     }
+}
+
+/** Prints geometry help. */
+void help_geometry()
+{
+    g_print(HELP_GEOMETRY);
 }
 
 /**
@@ -224,7 +258,7 @@ gchar *unescape(const gchar *str)
  */
 Options new_options(int argc, char *argv[])
 {
-    int num, num2;
+    int w, h, x, y;
     gboolean force_arg;
     char *argp;
     char c, arg;
@@ -241,6 +275,7 @@ Options new_options(int argc, char *argv[])
     options.height = DEFAULT_WINDOW_HEIGHT;
     options.i_separator = DEFAULT_INPUT_SEPARATOR;
     options.o_separator = DEFAULT_OUTPUT_SEPARATOR;
+    options.ok = TRUE;
 
     len = sizeof(arguments)/sizeof(Argument);
     i = 1;
@@ -250,6 +285,7 @@ Options new_options(int argc, char *argv[])
 
         if (argp[0] != '-' || argp[1] == '\0') {
             help();
+            options.ok = FALSE;
             break;
         }
 
@@ -283,6 +319,7 @@ Options new_options(int argc, char *argv[])
 
         if ( j == len ) {
             help();
+            options.ok = FALSE;
             break;
         }
 
@@ -291,60 +328,42 @@ Options new_options(int argc, char *argv[])
         j = i;
         if (arg == 'g') {
             if (!argp) {
-                help();
+                help_geometry();
+                options.ok = FALSE;
                 break;
             }
             ++i;
 
-            /** \todo better parsing of geometry values */
-            /* width,height,x,y - all optional */
-            /* width */
-            num2 = sscanf(argp, "%d%c", &num, &c);
-            if (num2 > 0 && num > 0)
-                options.width = num;
-
-            while( isdigit(*argp) || *argp=='+' ) ++argp;
-            if (*argp == ',') {
-                ++argp;
-            } else if (*argp != '\0') {
-                help();
-                break;
-            }
-
-            /* height */
-            num2 = sscanf(argp, "%d", &num);
-            if (num2 > 0 && num > 0)
-                options.height = num;
-
-            while( isdigit(*argp) || *argp=='+' ) ++argp;
-            if (*argp == ',') {
-                ++argp;
-            } else if (*argp != '\0') {
-                help();
-                break;
-            }
-
-            /* x */
-            num2 = sscanf(argp, "%d", &num);
-            if (num2 > 0)
-                options.x = num;
-
-            while( isdigit(*argp) || *argp=='+' || *argp=='-' ) ++argp;
-            if (*argp == ',') {
-                ++argp;
-            } else if (*argp != '\0') {
-                help();
-                break;
-            }
-
-            /* y */
-            num2 = sscanf(argp, "%d", &num);
-            if (num2 > 0)
-                options.y = num;
-
-            while( isdigit(*argp) || *argp=='+' || *argp=='-' ) ++argp;
-            if (*argp != '\0') {
-                help();
+            if ( sscanf(argp, "%dx%d%d%d%c", &w, &h, &x, &y, &c) == 4 ) {
+                /* WxH+X+Y */
+                options.width = w;
+                options.height = h;
+                options.x = x;
+                options.y = y;
+            } else if ( sscanf(argp, "%dx%d%d%c", &w, &h, &x, &c) == 3 ) {
+                /* WxH+X */
+                options.width = w;
+                options.height = h;
+                options.x = x;
+            } else if ( sscanf(argp, "%dx%d%c", &w, &h, &c) == 2 ) {
+                /* WxH */
+                options.width = w;
+                options.height = h;
+            } else if ( sscanf(argp, "%d%d%d%c", &h, &x, &y, &c) == 3 ) {
+                /* H+X+Y */
+                options.height = h;
+                options.x = x;
+                options.y = y;
+            } else if ( sscanf(argp, "%d%d%c", &x, &y, &c) == 2 ) {
+                /* +X+Y */
+                options.x = x;
+                options.y = y;
+            } else if ( sscanf(argp, "%d%c", &w, &c) == 1 ) {
+                /* W */
+                options.width = w;
+            } else {
+                help_geometry();
+                options.ok = FALSE;
                 break;
             }
         } else if (arg == 'h') {
@@ -353,18 +372,27 @@ Options new_options(int argc, char *argv[])
         } else if (arg == 'i') {
             if (!argp) {
                 help();
+                options.ok = FALSE;
                 break;
             }
             ++i;
             options.i_separator = unescape(argp);
         } else if (arg == 'l') {
-            if (!argp) help(1);
+            if (!argp) {
+                help();
+                options.ok = FALSE;
+                break;
+            }
             ++i;
             options.label = argp;
         } else if (arg == 'm') {
             options.hide_list = TRUE;
         } else if (arg == 'o') {
-            if (!argp) help(1);
+            if (!argp) {
+                help();
+                options.ok = FALSE;
+                break;
+            }
             ++i;
             options.o_separator = unescape(argp);
         } else if (arg == 's') {
@@ -374,41 +402,45 @@ Options new_options(int argc, char *argv[])
         } else if (arg == 't') {
             if (!argp) {
                 help();
+                options.ok = FALSE;
                 break;
             }
             ++i;
             options.title = argp;
         } else {
             help();
+            options.ok = FALSE;
             break;
         }
 
         if (force_arg && i == j) {
             help();
+            options.ok = FALSE;
             break;
         }
     }
 
-    options.ok = i == argc;
+    options.ok &= i == argc;
 
     return options;
 }
 
 
-static void destroy(GtkWidget *w, gpointer data)
+static void submit(Application *app)
 {
+    g_print( gtk_entry_get_text(app->entry) );
+    app->exit_code = 0;
     gtk_main_quit();
 }
 
-/** Hides list (event handler). */
-gboolean hide_list(GtkWidget *widget, GdkEvent *event, Application *app)
+/** Hides list. */
+void hide_list(Application *app)
 {
     gint w, h;
 
     gtk_widget_hide( GTK_WIDGET(app->scroll_window) );
     gtk_window_get_size( app->window, &w, &h );
     gtk_window_resize( app->window, w, 1 );
-    return TRUE;
 }
 
 /** Shows list. */
@@ -438,9 +470,7 @@ gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
             /** If enter key pressed, print entry text and exit with code 0. */
             case GDK_KEY_KP_Enter:
             case GDK_KEY_Return:
-                g_print( gtk_entry_get_text(app->entry) );
-                app->exit_code = 0;
-                gtk_main_quit();
+                submit(app);
                 return TRUE;
             /**
              * If tab or down key pressed and entry widget has focus,
@@ -519,13 +549,13 @@ GdkPixbuf *pixbuf_from_file(const gchar *filename)
 
     if (file) {
         GFileInfo *info = g_file_query_info (file, G_FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE, G_FILE_QUERY_INFO_NONE, NULL, NULL);
-        if (info != NULL)
+        if (info)
         {
             GIcon *mime_icon = g_content_type_get_icon (g_file_info_get_content_type (info));
-            if (mime_icon != NULL)
+            if (mime_icon)
             {
                 GtkIconInfo *icon_info = gtk_icon_theme_lookup_by_gicon(icon_theme, mime_icon, 16, GTK_ICON_LOOKUP_USE_BUILTIN);
-                if (icon_info != NULL)
+                if (icon_info)
                 {
                     pixbuf = gtk_icon_info_load_icon (icon_info, NULL);
                     gtk_icon_info_free (icon_info);
@@ -572,14 +602,13 @@ const gchar *match_tokens(const gchar *haystack, const gchar *needle)
 }
 
 /**
- * Appends item to store.
- * Creates new row with \a text in \a store at given position (\a iter).
+ * Insert item to store.
+ * Creates new row with \a text and icon (\a pixbuf) in \a store at given position (\a iter).
  * Row will be hidden if \a visible is FALSE.
  * If \a text is filename or path to existing file, an icon is created.
  */
-void append_item(GtkTreeIter *iter, const gchar *text, gboolean visible, GtkListStore *store)
+void insert_item(GtkTreeIter *iter, const gchar *text, GdkPixbuf *pixbuf, gboolean visible, GtkListStore *store)
 {
-    GdkPixbuf *pixbuf = pixbuf_from_file(text);
     gtk_list_store_append(store, iter);
     gtk_list_store_set( store, iter,
             COL_VISIBLE, visible,
@@ -610,7 +639,7 @@ gboolean complete(const gchar *text, Application *app)
     if (*a && !*b) {
         app->filter = FALSE;
         gtk_editable_insert_text( GTK_EDITABLE(app->entry), a, -1, &pos );
-        gtk_entry_select_region(app->entry, -1, (gint)(b-filter_text));
+        gtk_editable_select_region( GTK_EDITABLE(app->entry), -1, (gint)(b-filter_text) );
         app->filter = TRUE;
 
         return TRUE;
@@ -649,16 +678,11 @@ gchar *get_filter_text(gint *from, gint *to, Application *app)
 }
 
 /**
- * Appends items to list.
- * Appends all items in \a str separated by input separator (Application::i_separator).
- * Last item is added only if \a last is \c TRUE.
+ * Appends item to list.
  * \callgraph
  */
-char *append_items(char *str, gboolean last, Application *app)
+void append_item(char *text, Application *app)
 {
-    char *sep = app->i_separator;
-    int sep_len = strlen(sep);
-    char *a, *b;
     gboolean visible;
     int from, to;
     GtkTreeIter iter;
@@ -667,61 +691,31 @@ char *append_items(char *str, gboolean last, Application *app)
     filter_text = get_filter_text(&from, &to, app);
     app->complete &= from == to;
 
-    a = str;
-    b = NULL;
-    while( (*sep && (b = strstr(a, sep))) || last ) {
-        if (last && !b) {
-            b = str + strlen(str);
-            sep_len = 0;
-        }
-        *b = 0;
+    visible = match_tokens(text, filter_text) != NULL;
 
-        visible = match_tokens(a, filter_text) != NULL;
-
-        /**
-         * Does in-line completion only for last output item and only if:
-         * - no text in entry is selected and
-         * - text cursor is at the end of entry and
-         * - Application::complete is \c TRUE.
-         */
-        if ( app->complete && visible && !app->filter_timer &&
-                gtk_entry_get_text_length(app->entry) == to ) {
-            complete(a, app);
-        }
-
-        /* append new item */
-        append_item(&iter, a, visible, app->store);
-
-        /* last item added */
-        if (sep_len == 0)
-            break;
-
-        a = b+sep_len;
+    /**
+     * Does in-line completion only for last output item and only if:
+     * - no text in entry is selected and
+     * - text cursor is at the end of entry and
+     * - Application::complete is \c TRUE.
+     */
+    if ( app->complete && visible && !app->filter_timer &&
+            gtk_entry_get_text_length(app->entry) == to ) {
+        complete(text, app);
     }
+
+    /* append new item */
+    insert_item(&iter, text, pixbuf_from_file(text), visible, app->store);
 
     g_free(filter_text);
-
-    /* move last incomplete item to the begging of string */
-    if (a != str) {
-        if (*a) {
-            b = a-1;
-            a = str-1;
-            while( (*(++a) = *(++b)) );
-        } else {
-            a = str;
-            *a = 0;
-        }
-    } else {
-        while (*a) ++a;
-    }
-
-    return a;
 }
 
 /**
  * Read items from standard input.
- * After maximum of #STDIN_BATCH_SIZE passes control back to main event loop.
- * If the whole input is read the application may be unresponsive for some time.
+ * After at most #STDIN_BATCH_SIZE characters read from stdin passes control
+ * back to main event loop.
+ * If the whole input is read at once the application may be unresponsive for
+ * some time.
  * \return TRUE if no error occurred and input isn't at end
  * \callgraph
  */
@@ -731,9 +725,15 @@ gboolean readStdin(Application *app)
     static gchar *bufp = buf;
     static struct timeval stdin_tv = {0,0};
     fd_set stdin_fds;
-    int i;
+    int i, c;
+    const gchar *a, *b;
+    const gchar *sep = app->i_separator;
+    const int sep_len = strlen(sep);
 
-    /* interrupt after reading at most N lines */
+    /* disable stdin buffering (otherwise select waits on new line) */
+    setbuf(stdin, NULL);
+
+    /* interrupt after reading at most N characters */
     for( i = 0; i < STDIN_BATCH_SIZE; ++i ) {
         /* check if data available */
         FD_ZERO(&stdin_fds);
@@ -742,8 +742,21 @@ gboolean readStdin(Application *app)
             break;
 
         /* read data */
-        if ( fgets(bufp, BUFSIZ - (bufp - buf), stdin) ) {
-            bufp = append_items(buf, FALSE, app);
+        if ( (c = getchar()) != EOF ) {
+            *bufp = c;
+            ++bufp;
+            /* is separator? */
+            if (sep_len) {
+                for( a = bufp-sep_len, b = sep; *b && a < bufp && *a == *b; ++a, ++b );
+                if (!*b) {
+                    *(bufp-sep_len) = 0;
+                    bufp = buf;
+
+                    /* append new item if not empty */
+                    if (buf[0])
+                        append_item(buf, app);
+                }
+            }
 
             if ( bufp >= &buf[BUFSIZ-1] ) {
                 /** \bug Doesn't handle buffer overflow. */
@@ -758,8 +771,10 @@ gboolean readStdin(Application *app)
     }
 
     if ( ferror(stdin) || feof(stdin) ) {
+        /* insert last item */
+        *bufp = 0;
         if (buf[0])
-            append_items(buf, TRUE,  app);
+            append_item(buf, app);
         return FALSE;
     } else {
         return TRUE;
@@ -819,11 +834,12 @@ gboolean item_select( GtkTreeSelection *selection,
     const gchar *a, *b;
     gint sep_len;
     const gchar *text = gtk_entry_get_text(app->entry);
-    gint from, to;
+
+    /* avoid refiltering list when selecting item with mouse */
+    gtk_widget_grab_focus( GTK_WIDGET(app->tree_view) );
 
     /* delete selection */
-    gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), &from, &to);
-    gtk_entry_buffer_delete_text( gtk_entry_get_buffer(app->entry), from, to );
+    gtk_editable_delete_selection( GTK_EDITABLE(app->entry) );
 
     /* find beginning of last output item */
     b = text;
@@ -843,7 +859,8 @@ gboolean item_select( GtkTreeSelection *selection,
          !gtk_tree_selection_path_is_selected(selection, path) )
         append_item_text(model, path, &iter, app);
 
-    gtk_entry_select_region(app->entry, b == text ? 0 : b-text+sep_len, -1);
+    gtk_editable_select_region( GTK_EDITABLE(app->entry),
+                                b == text ? 0 : b-text+sep_len, -1 );
 
     return TRUE;
 }
@@ -1007,15 +1024,26 @@ GtkTreeView *create_list_view(GtkTreeModel *model)
 /** Sets window geometry using \a options */
 void set_window_geometry(const Options *options, Application *app)
 {
-    gint x ,y;
+    gint x ,y, w, h;
     GdkGravity gravity;
+    GdkScreen *screen = gtk_window_get_screen(app->window);
 
     /* default position: center of the screen */
     gtk_window_set_position(app->window, GTK_WIN_POS_CENTER);
 
     /* resizes window */
-    gtk_window_resize( app->window, options->width, options->height );
-    app->height = options->height;
+    w = options->width;
+    h = options->height;
+    if (w < 0)
+        w = gdk_screen_get_width(screen) + w + 1;
+    else if (w == 0)
+        w = DEFAULT_WINDOW_WIDTH;
+    if (h < 0)
+        h = gdk_screen_get_height(screen) + h + 1;
+    else if (h == 0)
+        h = DEFAULT_WINDOW_HEIGHT;
+    gtk_window_resize(app->window, w, h);
+    app->height = h;
 
     /* moves window */
     if (options->x != OPTION_UNSET || options->y != OPTION_UNSET) {
@@ -1077,7 +1105,8 @@ Application *new_application(const Options *options)
 
     /** - text entry, */
     app->entry = GTK_ENTRY( gtk_entry_new() );
-    app->label = GTK_LABEL( gtk_label_new(options->label) );
+    app->button = GTK_BUTTON( gtk_button_new_with_label(options->label) );
+    g_object_set(app->button, "can-focus", FALSE, NULL);
 
     /** - list store and filtered model, */
     app->store = gtk_list_store_new( 3,
@@ -1097,6 +1126,7 @@ Application *new_application(const Options *options)
     if (app->o_separator) {
         gtk_tree_selection_set_mode( gtk_tree_view_get_selection(app->tree_view),
                                      GTK_SELECTION_MULTIPLE );
+        gtk_tree_view_set_rubber_banding(app->tree_view, TRUE);
     }
 
     /** - scrolled window for item list. */
@@ -1105,12 +1135,13 @@ Application *new_application(const Options *options)
             GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC );
 
     /* signals */
-    g_signal_connect(app->window, "destroy", G_CALLBACK(destroy), NULL);
+    g_signal_connect(app->window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     g_signal_connect(app->window, "key-press-event", G_CALLBACK(on_key_press), app);
     g_signal_connect(app->tree_view, "key-press-event", G_CALLBACK(tree_view_on_key_press), app);
     /*g_signal_connect(app->entry, "changed", G_CALLBACK(entry_changed), app);*/
     g_signal_connect(app->entry, "insert-text", G_CALLBACK(insert_text), app);
     g_signal_connect(app->entry, "delete-text", G_CALLBACK(delete_text), app);
+    g_signal_connect_swapped(app->button, "clicked", G_CALLBACK(submit), app);
 
     /* on item selected */
     gtk_tree_selection_set_select_function(
@@ -1123,21 +1154,26 @@ Application *new_application(const Options *options)
     hbox = gtk_hbox_new(FALSE, 2);
     /*gtk_container_set_border_width( GTK_CONTAINER(window), 2 );*/
     gtk_container_add( GTK_CONTAINER(app->window), layout );
-    gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app->label), 0,1,0 );
     gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app->entry), 1,1,0 );
+    gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app->button), 0,1,0 );
     gtk_box_pack_start( GTK_BOX(layout), hbox, 0,1,0 );
     gtk_box_pack_start( GTK_BOX(layout), GTK_WIDGET(app->scroll_window), 1,1,0 );
     gtk_container_add( GTK_CONTAINER(app->scroll_window), GTK_WIDGET(app->tree_view) );
 
-    /* window position and size */
+    /* show widgets (from inner-most) */
+    gtk_widget_show( GTK_WIDGET(app->tree_view) );
+    gtk_widget_show( GTK_WIDGET(app->scroll_window) );
+    gtk_widget_show_all( GTK_WIDGET(hbox) );
+    gtk_widget_show( GTK_WIDGET(layout) );
     set_window_geometry(options, app);
-
-    gtk_widget_show_all( GTK_WIDGET(app->window) );
     if (app->hide_list) {
-        hide_list(NULL, NULL, app);
-        g_signal_connect( app->tree_view, "focus-out-event",
+        hide_list(app);
+        g_signal_connect_swapped( app->tree_view, "focus-out-event",
                           G_CALLBACK(hide_list), app );
     }
+    gtk_widget_show( GTK_WIDGET(app->window) );
+
+    gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
 
     return app;
 }

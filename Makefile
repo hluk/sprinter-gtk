@@ -4,7 +4,7 @@ CFLAGS = -Wall -O0 -ggdb
 all: sprinter
 
 sprinter: main.c sprinter_icon.h
-	gcc $(CFLAGS) `pkg-config --cflags --libs gtk+-2.0` -o $@ $^
+	gcc $(CFLAGS) `pkg-config --cflags --libs gtk+-2.0 gdk-2.0` -o $@ $^
 
 sprinter_icon.h: sprinter.png
 	( \
