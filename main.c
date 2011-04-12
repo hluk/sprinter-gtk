@@ -8,7 +8,7 @@
  * Main window, widgets are created and state initialized (see #Application)
  * using #new_application.
  *
- * Control is passed to GTK main event loop from which #readStdin is called
+ * Control is passed to GTK main event loop from which #read_items is called
  * every time the application is idle and stdin is open. This function parses
  * items from stdin. Function is interrupted after reading at most
  * #STDIN_BATCH_SIZE characters (changing value #STDIN_BATCH_SIZE may improve
@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
+#include <sys/select.h>
 
 #include "sprinter_icon.h"
 
@@ -38,7 +39,7 @@
 
 /** geometry help */
 #define HELP_GEOMETRY \
-"Window geometry can be changed with -g option which takes single argument.\n" \
+"Window geometry can be changed with -g option with single argument.\n" \
 "Argument format is either W[xH[X[Y]]] or [H]XY where W is width, H is height\n" \
 "X is horizontal position and Y is vertical position.\n" \
 "\n" \
@@ -47,8 +48,7 @@
 "If horizontal or vertical position is negative, window is moved from right or\n" \
 "bottom screen edge.\n" \
 "\n" \
-"If two numbers are immediately next to each other, second number must\n" \
-"have a sign (+ or -).\n" \
+"Use sign (+ or -) to separate numbers immediately next to each other.\n" \
 "\n" \
 "Examples:\n" \
 "   200x600  Window height is 200 pixels, width is 600 pixels and position is\n" \
@@ -56,7 +56,6 @@
 "       0+0  Window is placed at the top left screen corner.\n" \
 "      -1-1  Window is placed at the bottom right screen corner.\n" \
 "    -1-1-1  Window has maximal height and is placed at the right screen edge.\n" \
-"    -1+0+0  Window has maximal height and is placed at the left screen edge.\n" \
 "  -1x1+0-1  Window has maximal width and minimal height and is placed at\n" \
 "            the bottom screen edge.\n"
 
@@ -158,7 +157,7 @@ const Argument arguments[] = {
     {'l', "label",             "text input label"},
     {'m', "minimal",           "hide list (press TAB key to show the list)"},
     {'o', "output-separator",  "string which separates items on output"},
-    /*{'s', "sort",              "sort items alphabetically"},*/
+    {'s', "sort",              "sort items naturally"},
     /*{'S', "strict",            "choose only items from stdin"},*/
     {'t', "title",             "title"}
 };
@@ -204,19 +203,19 @@ void help()
     int len, i;
     const Argument *arg;
 
-    g_print(HELP_HEADER);
+    g_printerr(HELP_HEADER);
 
     len = sizeof(arguments)/sizeof(Argument);
     for ( i = 0; i<len; ++i ) {
         arg = &arguments[i];
-        g_print( "  -%c, --%-12s %s\n", arg->shopt, arg->opt, arg->help );
+        g_printerr( "  -%c, --%-18s %s\n", arg->shopt, arg->opt, arg->help );
     }
 }
 
 /** Prints geometry help. */
 void help_geometry()
 {
-    g_print(HELP_GEOMETRY);
+    g_printerr(HELP_GEOMETRY);
 }
 
 /**
@@ -457,7 +456,6 @@ void show_list(Application *app)
 gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 {
     guint key;
-    GtkTreePath *path;
 
     if (event->type == GDK_KEY_PRESS){
         key = event->key.keyval;
@@ -472,41 +470,6 @@ gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
             case GDK_KEY_Return:
                 submit(app);
                 return TRUE;
-            /**
-             * If tab or down key pressed and entry widget has focus,
-             * show and focus list.
-             */
-            case GDK_KEY_Tab:
-            case GDK_KEY_Down:
-            case GDK_KEY_Page_Down:
-                if ( gtk_widget_has_focus(GTK_WIDGET(app->entry)) ) {
-                    if (app->hide_list)
-                        show_list(app);
-
-                    gtk_tree_view_get_cursor( app->tree_view, &path, NULL);
-                    gtk_widget_grab_focus( GTK_WIDGET(app->tree_view) );
-
-                    if (!path) {
-                        path = gtk_tree_path_new_first();
-                        gtk_tree_view_set_cursor( app->tree_view, path, NULL, FALSE );
-                    }
-                    gtk_tree_path_free(path);
-
-                    return TRUE;
-                }
-                break;
-            /**
-             * If left or right arrow pressed and list has focus,
-             * focus widget and set cursor position.
-             */
-            case GDK_KEY_Left:
-            case GDK_KEY_Right:
-                if ( gtk_widget_has_focus(GTK_WIDGET(app->tree_view)) ) {
-                    gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
-                    gtk_entry_set_position( app->entry, key == GDK_KEY_Left ? 0 : -1 );
-                    return TRUE;
-                }
-                break;
         }
     }
 
@@ -516,24 +479,92 @@ gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 /** list view key-press-event handler */
 gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 {
-    guint key = event->key.keyval;
+    guint key;
+    GtkTreePath *path;
 
     /** If at top of the list and up key pressed, focus entry. */
-    if (event->type == GDK_KEY_PRESS &&
-            (key == GDK_KEY_Up || key == GDK_KEY_Page_Up) ){
-        GtkTreePath *path;
-        gtk_tree_view_get_cursor( GTK_TREE_VIEW(widget), &path, NULL );
-        if (path) {
-            gboolean hasprev = gtk_tree_path_prev(path);
-            gtk_tree_path_free(path);
+    if (event->type == GDK_KEY_PRESS) {
+        key = event->key.keyval;
+        switch(key) {
+            /**
+             * If up of page up key was pressed and first item is current
+             * focus text entry.
+             */
+            case GDK_KEY_Up:
+            case GDK_KEY_Page_Up:
+                gtk_tree_view_get_cursor( GTK_TREE_VIEW(widget), &path, NULL );
+                if (path) {
+                    gboolean hasprev = gtk_tree_path_prev(path);
+                    gtk_tree_path_free(path);
 
-            if (!hasprev) {
+                    if (!hasprev) {
+                        gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
+                        return TRUE;
+                    }
+                }
+                break;
+            /**
+             * If left or right arrow pressed and list has focus,
+             * focus widget and set cursor position.
+             */
+            case GDK_KEY_Left:
+            case GDK_KEY_Right:
                 gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
+                gtk_entry_set_position( app->entry, key == GDK_KEY_Left ? 0 : -1 );
                 return TRUE;
-            }
         }
     }
 
+    return FALSE;
+}
+
+/** text entry key-press-event handler */
+gboolean entry_on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
+{
+    guint key;
+    GtkTreePath *path;
+
+    /** If at top of the list and up key pressed, focus entry. */
+    if (event->type == GDK_KEY_PRESS) {
+        key = event->key.keyval;
+        switch(key) {
+            /**
+             * If tab or down key pressed and entry widget has focus,
+             * show and focus list.
+             */
+            case GDK_KEY_Tab:
+            case GDK_KEY_Down:
+            case GDK_KEY_Page_Down:
+                if (app->hide_list)
+                    show_list(app);
+
+                gtk_tree_view_get_cursor( app->tree_view, &path, NULL);
+                gtk_widget_grab_focus( GTK_WIDGET(app->tree_view) );
+
+                if (!path) {
+                    path = gtk_tree_path_new_first();
+                    gtk_tree_view_set_cursor( app->tree_view, path, NULL, FALSE );
+                }
+                gtk_tree_path_free(path);
+
+                return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+/** Enables list refiltering. */
+gboolean enable_filter(Application *app)
+{
+    app->filter = TRUE;
+    return FALSE;
+}
+
+/** Disables list refiltering */
+gboolean disable_filter(Application *app)
+{
+    app->filter = FALSE;
     return FALSE;
 }
 
@@ -637,10 +668,10 @@ gboolean complete(const gchar *text, Application *app)
             *a && *b && toupper(*a) == toupper(*b);
             ++a, ++b );
     if (*a && !*b) {
-        app->filter = FALSE;
+        disable_filter(app);
         gtk_editable_insert_text( GTK_EDITABLE(app->entry), a, -1, &pos );
         gtk_editable_select_region( GTK_EDITABLE(app->entry), -1, (gint)(b-filter_text) );
-        app->filter = TRUE;
+        enable_filter(app);
 
         return TRUE;
     }
@@ -719,7 +750,7 @@ void append_item(char *text, Application *app)
  * \return TRUE if no error occurred and input isn't at end
  * \callgraph
  */
-gboolean readStdin(Application *app)
+gboolean read_items(Application *app)
 {
     static gchar buf[BUFSIZ] = "";
     static gchar *bufp = buf;
@@ -781,18 +812,68 @@ gboolean readStdin(Application *app)
     }
 }
 
+/** Compare two items in model. */
+gint natural_compare( GtkTreeModel *model,
+                      GtkTreeIter *a,
+                      GtkTreeIter *b,
+                      gpointer user_data )
+{
+    gchar *item1, *item2, *aa, *bb;
+    int num1, num2;
+    gint result = 0;
+
+    gtk_tree_model_get(model, a, COL_TEXT, &item1, -1);
+    gtk_tree_model_get(model, b, COL_TEXT, &item2, -1);
+
+    for( aa = item1, bb = item2; *aa && *bb; ++aa, ++bb ) {
+        if ( isdigit(*aa) && isdigit(*bb) ) {
+            sscanf(aa, "%d%s", &num1, aa);
+            sscanf(bb, "%d%s", &num2, bb);
+            if (num1 != num2) {
+                result = num1 - num2;
+                break;
+            }
+        } else if (*aa != *bb) {
+            result = *aa - *bb;
+            break;
+        }
+    }
+
+    g_free(item1);
+    g_free(item2);
+
+    return result;
+}
+
 /**
- * Create filtered model from list store.
+ * Create filtered model from \a model.
  * Items are filtered using #COL_VISIBLE column.
  */
-GtkTreeModel *create_filter(GtkListStore *store)
+GtkTreeModel *create_filtered_model(GtkTreeModel *model)
 {
-    GtkTreeModel *filter;
+    GtkTreeModel *filtered;
 
-    filter = gtk_tree_model_filter_new( GTK_TREE_MODEL(store), NULL );
-    gtk_tree_model_filter_set_visible_column( GTK_TREE_MODEL_FILTER(filter), COL_VISIBLE );
+    filtered = gtk_tree_model_filter_new(model, NULL);
+    gtk_tree_model_filter_set_visible_column( GTK_TREE_MODEL_FILTER(filtered), COL_VISIBLE );
 
-    return filter;
+    return filtered;
+}
+
+/**
+ * Create sorteded model from \a model.
+ * Items are sorted using #COL_TEXT column.
+ */
+GtkTreeModel *create_sorted_model(GtkTreeModel *model)
+{
+    GtkTreeModel *sorted;
+
+    sorted = gtk_tree_model_sort_new_with_model(model);
+    gtk_tree_sortable_set_sort_func( GTK_TREE_SORTABLE(sorted), COL_TEXT,
+                                     natural_compare, NULL, NULL );
+    gtk_tree_sortable_set_sort_column_id( GTK_TREE_SORTABLE(sorted), COL_TEXT,
+                                          GTK_SORT_ASCENDING );
+
+    return sorted;
 }
 
 /**
@@ -832,7 +913,7 @@ gboolean item_select( GtkTreeSelection *selection,
     GtkTreeIter iter;
     gchar *sep = app->o_separator;
     const gchar *a, *b;
-    gint sep_len;
+    gint sep_len = 0;
     const gchar *text = gtk_entry_get_text(app->entry);
 
     /* avoid refiltering list when selecting item with mouse */
@@ -954,7 +1035,7 @@ void insert_text( GtkEditable *editable,
                   gpointer     position,
                   Application *app )
 {
-    if ( app->filter && gtk_widget_has_focus(GTK_WIDGET(editable)) ) {
+    if (app->filter) {
         app->complete = TRUE;
         delayed_refilter(app);
     }
@@ -969,7 +1050,7 @@ void delete_text( GtkEditable *editable,
                   gint         end_pos,
                   Application *app )
 {
-    if ( gtk_widget_has_focus(GTK_WIDGET(editable)) ) {
+    if (app->filter) {
         app->complete = FALSE;
         delayed_refilter(app);
     }
@@ -1099,7 +1180,6 @@ Application *new_application(const Options *options)
     /** - main window, */
     app->window = GTK_WINDOW( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
     gtk_window_set_title( app->window, options->title );
-    /*gtk_window_set_icon_from_file( app->window, "sprinter.svg", NULL );*/
     pixbuf = gdk_pixbuf_new_from_inline(-1, sprinter_icon, FALSE, NULL);
     gtk_window_set_icon( app->window, pixbuf );
 
@@ -1113,10 +1193,9 @@ Application *new_application(const Options *options)
                     G_TYPE_BOOLEAN,
                     GDK_TYPE_PIXBUF,
                     G_TYPE_STRING );
-    model = create_filter(app->store);
-
-    /* appends lines from stdin to list store */
-    g_idle_add( (GSourceFunc)readStdin, app );
+    model = create_filtered_model( GTK_TREE_MODEL(app->store) );
+    if (options->sort_list)
+        model = create_sorted_model(model);
 
     /** - list view, */
     app->tree_view = create_list_view(model);
@@ -1138,10 +1217,12 @@ Application *new_application(const Options *options)
     g_signal_connect(app->window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     g_signal_connect(app->window, "key-press-event", G_CALLBACK(on_key_press), app);
     g_signal_connect(app->tree_view, "key-press-event", G_CALLBACK(tree_view_on_key_press), app);
-    /*g_signal_connect(app->entry, "changed", G_CALLBACK(entry_changed), app);*/
+    g_signal_connect(app->entry, "key-press-event", G_CALLBACK(entry_on_key_press), app);
     g_signal_connect(app->entry, "insert-text", G_CALLBACK(insert_text), app);
     g_signal_connect(app->entry, "delete-text", G_CALLBACK(delete_text), app);
     g_signal_connect_swapped(app->button, "clicked", G_CALLBACK(submit), app);
+    g_signal_connect_swapped(app->entry, "focus-in-event", G_CALLBACK(enable_filter), app );
+    g_signal_connect_swapped(app->entry, "focus-out-event", G_CALLBACK(disable_filter), app );
 
     /* on item selected */
     gtk_tree_selection_set_select_function(
@@ -1200,6 +1281,9 @@ int main(int argc, char *argv[])
     gtk_init(&argc, &argv);
 
     app = new_application(&options);
+
+    /** Starts appending lines from stdin to list store. */
+    g_idle_add( (GSourceFunc)read_items, app );
 
     gtk_main();
 
