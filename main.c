@@ -114,8 +114,12 @@ typedef struct {
     GtkTreeView *tree_view;
     /** widget for scrolling item list */
     GtkScrolledWindow *scroll_window;
-    /** model for items */
+    /** list store for items */
     GtkListStore *store;
+    /** filtered model */
+    GtkTreeModel *filtered_model;
+    /** sorted model */
+    GtkTreeModel *sorted_model;
 
     /** Temporarily toggle auto-completion. */
     gboolean complete;
@@ -137,6 +141,9 @@ typedef struct {
 
     /** exit code for program */
     int exit_code;
+
+    /** text typed by user */
+    gchar *original_text;
 } Application;
 
 /** program arguments */
@@ -452,6 +459,20 @@ void show_list(Application *app)
     gtk_window_resize( app->window, w, app->height );
 }
 
+/** Enables list refiltering. */
+gboolean enable_filter(Application *app)
+{
+    app->filter = TRUE;
+    return FALSE;
+}
+
+/** Disables list refiltering */
+gboolean disable_filter(Application *app)
+{
+    app->filter = FALSE;
+    return FALSE;
+}
+
 /** window key-press-event handler */
 gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 {
@@ -477,7 +498,9 @@ gboolean on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
 }
 
 /** list view key-press-event handler */
-gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
+gboolean tree_view_on_key_press( GtkWidget *widget,
+                                 GdkEvent *event,
+                                 Application *app )
 {
     guint key;
     GtkTreePath *path;
@@ -498,7 +521,11 @@ gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, Application 
                     gtk_tree_path_free(path);
 
                     if (!hasprev) {
+                        disable_filter(app);
+                        gtk_entry_set_text(app->entry, app->original_text);
                         gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
+                        gtk_entry_set_position(app->entry, -1);
+                        enable_filter(app);
                         return TRUE;
                     }
                 }
@@ -510,7 +537,8 @@ gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, Application 
             case GDK_KEY_Left:
             case GDK_KEY_Right:
                 gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
-                gtk_entry_set_position( app->entry, key == GDK_KEY_Left ? 0 : -1 );
+                gtk_entry_set_position( app->entry,
+                                        key == GDK_KEY_Left ? 0 : -1 );
                 return TRUE;
         }
     }
@@ -519,7 +547,9 @@ gboolean tree_view_on_key_press(GtkWidget *widget, GdkEvent *event, Application 
 }
 
 /** text entry key-press-event handler */
-gboolean entry_on_key_press(GtkWidget *widget, GdkEvent *event, Application *app)
+gboolean entry_on_key_press( GtkWidget *widget,
+                             GdkEvent *event,
+                             Application *app )
 {
     guint key;
     GtkTreePath *path;
@@ -543,7 +573,8 @@ gboolean entry_on_key_press(GtkWidget *widget, GdkEvent *event, Application *app
 
                 if (!path) {
                     path = gtk_tree_path_new_first();
-                    gtk_tree_view_set_cursor( app->tree_view, path, NULL, FALSE );
+                    gtk_tree_view_set_cursor( app->tree_view, path,
+                                              NULL, FALSE );
                 }
                 gtk_tree_path_free(path);
 
@@ -554,20 +585,6 @@ gboolean entry_on_key_press(GtkWidget *widget, GdkEvent *event, Application *app
     return FALSE;
 }
 
-/** Enables list refiltering. */
-gboolean enable_filter(Application *app)
-{
-    app->filter = TRUE;
-    return FALSE;
-}
-
-/** Disables list refiltering */
-gboolean disable_filter(Application *app)
-{
-    app->filter = FALSE;
-    return FALSE;
-}
-
 /**
  * file icon
  * \return file icon if file with path \a filename exists, NULL otherwise
@@ -575,27 +592,29 @@ gboolean disable_filter(Application *app)
 GdkPixbuf *pixbuf_from_file(const gchar *filename)
 {
     GdkPixbuf *pixbuf = NULL;
-    GFile *file = g_file_new_for_path (filename);
+    GFile *file = g_file_new_for_path(filename);
     GtkIconTheme *icon_theme = gtk_icon_theme_get_default();
 
     if (file) {
-        GFileInfo *info = g_file_query_info (file, G_FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE, G_FILE_QUERY_INFO_NONE, NULL, NULL);
-        if (info)
-        {
-            GIcon *mime_icon = g_content_type_get_icon (g_file_info_get_content_type (info));
-            if (mime_icon)
-            {
-                GtkIconInfo *icon_info = gtk_icon_theme_lookup_by_gicon(icon_theme, mime_icon, 16, GTK_ICON_LOOKUP_USE_BUILTIN);
-                if (icon_info)
-                {
-                    pixbuf = gtk_icon_info_load_icon (icon_info, NULL);
-                    gtk_icon_info_free (icon_info);
+        GFileInfo *info =
+            g_file_query_info( file, G_FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE,
+                               G_FILE_QUERY_INFO_NONE, NULL, NULL );
+        if (info) {
+            GIcon *mime_icon =
+                g_content_type_get_icon( g_file_info_get_content_type(info) );
+            if (mime_icon) {
+                GtkIconInfo *icon_info =
+                    gtk_icon_theme_lookup_by_gicon( icon_theme, mime_icon, 16,
+                                                    GTK_ICON_LOOKUP_USE_BUILTIN );
+                if (icon_info) {
+                    pixbuf = gtk_icon_info_load_icon(icon_info, NULL);
+                    gtk_icon_info_free(icon_info);
                 }
-                g_object_unref (mime_icon);
+                g_object_unref(mime_icon);
             }
-            g_object_unref (info);
+            g_object_unref(info);
         }
-        g_object_unref (file);
+        g_object_unref(file);
     }
 
     return pixbuf;
@@ -634,11 +653,16 @@ const gchar *match_tokens(const gchar *haystack, const gchar *needle)
 
 /**
  * Insert item to store.
- * Creates new row with \a text and icon (\a pixbuf) in \a store at given position (\a iter).
+ * Creates new row with \a text and icon (\a pixbuf) in \a store
+ * at position given by \a iter.
  * Row will be hidden if \a visible is FALSE.
  * If \a text is filename or path to existing file, an icon is created.
  */
-void insert_item(GtkTreeIter *iter, const gchar *text, GdkPixbuf *pixbuf, gboolean visible, GtkListStore *store)
+void insert_item( GtkTreeIter *iter,
+                  const gchar *text,
+                  GdkPixbuf *pixbuf,
+                  gboolean visible,
+                  GtkListStore *store )
 {
     gtk_list_store_append(store, iter);
     gtk_list_store_set( store, iter,
@@ -649,34 +673,6 @@ void insert_item(GtkTreeIter *iter, const gchar *text, GdkPixbuf *pixbuf, gboole
 
     if (pixbuf)
         g_object_unref(pixbuf);
-}
-
-/**
- * Completes text in entry.
- * \return TRUE if completion was successful, FALSE otherwise
- */
-gboolean complete(const gchar *text, Application *app)
-{
-    const char *filter_text;
-    const char *a, *b;
-    gint pos = -1;
-
-    filter_text = gtk_entry_get_text(app->entry);
-
-    /* if item starts with filter text */
-    for( a = text, b = filter_text;
-            *a && *b && toupper(*a) == toupper(*b);
-            ++a, ++b );
-    if (*a && !*b) {
-        disable_filter(app);
-        gtk_editable_insert_text( GTK_EDITABLE(app->entry), a, -1, &pos );
-        gtk_editable_select_region( GTK_EDITABLE(app->entry), -1, (gint)(b-filter_text) );
-        enable_filter(app);
-
-        return TRUE;
-    }
-
-    return FALSE;
 }
 
 /**
@@ -718,11 +714,15 @@ void append_item(char *text, Application *app)
     int from, to;
     GtkTreeIter iter;
     gchar *filter_text;
+    GtkTreePath *path;
 
     filter_text = get_filter_text(&from, &to, app);
     app->complete &= from == to;
 
     visible = match_tokens(text, filter_text) != NULL;
+
+    /* append new item */
+    insert_item(&iter, text, pixbuf_from_file(text), visible, app->store);
 
     /**
      * Does in-line completion only for last output item and only if:
@@ -732,11 +732,15 @@ void append_item(char *text, Application *app)
      */
     if ( app->complete && visible && !app->filter_timer &&
             gtk_entry_get_text_length(app->entry) == to ) {
-        complete(text, app);
+        gtk_tree_view_get_cursor( app->tree_view, &path, NULL);
+        if (path) {
+            gtk_tree_path_free(path);
+        } else {
+            path = gtk_tree_path_new_first();
+            gtk_tree_view_set_cursor( app->tree_view, path,
+                    NULL, FALSE );
+        }
     }
-
-    /* append new item */
-    insert_item(&iter, text, pixbuf_from_file(text), visible, app->store);
 
     g_free(filter_text);
 }
@@ -778,7 +782,8 @@ gboolean read_items(Application *app)
             ++bufp;
             /* is separator? */
             if (sep_len) {
-                for( a = bufp-sep_len, b = sep; *b && a < bufp && *a == *b; ++a, ++b );
+                for( a = bufp-sep_len, b = sep;
+                        *b && a < bufp && *a == *b; ++a, ++b );
                 if (!*b) {
                     *(bufp-sep_len) = 0;
                     bufp = buf;
@@ -854,7 +859,8 @@ GtkTreeModel *create_filtered_model(GtkTreeModel *model)
     GtkTreeModel *filtered;
 
     filtered = gtk_tree_model_filter_new(model, NULL);
-    gtk_tree_model_filter_set_visible_column( GTK_TREE_MODEL_FILTER(filtered), COL_VISIBLE );
+    gtk_tree_model_filter_set_visible_column( GTK_TREE_MODEL_FILTER(filtered),
+                                              COL_VISIBLE );
 
     return filtered;
 }
@@ -914,13 +920,17 @@ gboolean item_select( GtkTreeSelection *selection,
     gchar *sep = app->o_separator;
     const gchar *a, *b;
     gint sep_len = 0;
-    const gchar *text = gtk_entry_get_text(app->entry);
+    const gchar *text;
 
-    /* avoid refiltering list when selecting item with mouse */
-    gtk_widget_grab_focus( GTK_WIDGET(app->tree_view) );
+    if (path_currently_selected) {
+        return TRUE;
+    }
+
+    disable_filter(app);
 
     /* delete selection */
     gtk_editable_delete_selection( GTK_EDITABLE(app->entry) );
+    text = app->original_text;
 
     /* find beginning of last output item */
     b = text;
@@ -929,8 +939,9 @@ gboolean item_select( GtkTreeSelection *selection,
         while( (a = strstr(b, sep)) ) {
             b = a+sep_len;
         }
-        if (b != text)
+        if (b != text) {
             b -= sep_len;
+        }
     }
 
     /** Changes entry text to item text. */
@@ -940,8 +951,18 @@ gboolean item_select( GtkTreeSelection *selection,
          !gtk_tree_selection_path_is_selected(selection, path) )
         append_item_text(model, path, &iter, app);
 
+    /** select text */
     gtk_editable_select_region( GTK_EDITABLE(app->entry),
                                 b == text ? 0 : b-text+sep_len, -1 );
+    for( a = gtk_entry_get_text(app->entry), b = text;
+            *a && *b && *a == *b;
+            ++a, ++b );
+    if (!*b) {
+        gtk_editable_select_region( GTK_EDITABLE(app->entry),
+                                    b-text, -1 );
+    }
+
+    enable_filter(app);
 
     return TRUE;
 }
@@ -966,45 +987,70 @@ gboolean refilter(Application *app)
         app->filter_timer = NULL;
     }
 
+    if(!last_filter_text) {
+        last_filter_text = g_strdup("");
+    }
+
     filter_text = get_filter_text(&from, &to, app);
-    /* do not auto-complete if text is selected */
-    app->complete &= from == to;
-    model = GTK_TREE_MODEL(app->store);
 
     /**
      * If last filtered text starts with \a filter_text,
      * filter only visible items.
      */
-    if (last_filter_text) {
-        for( a = filter_text, b = last_filter_text;
-                *a && *b && toupper(*a) == toupper(*b);
-                ++a, ++b );
-        /* filter is same, nothing to do */
-        if( !*a && !*b )
-            return FALSE;
-        filter_visible = *a && !*b;
-        g_free(last_filter_text);
-    } else {
-        filter_visible = FALSE;
-    }
-    last_filter_text = filter_text;
+    for( a = filter_text, b = last_filter_text;
+            *a && *b && toupper(*a) == toupper(*b);
+            ++a, ++b );
+    /* filter only if previous filter differs */
+    if( *a || *b ) {
+        gtk_tree_selection_unselect_all(
+                gtk_tree_view_get_selection(app->tree_view) );
 
-    if ( gtk_tree_model_get_iter_first(model, &iter) ) {
-        do {
-            if (filter_visible) {
-                gtk_tree_model_get(model, &iter, COL_VISIBLE, &visible, -1);
-                if (!visible)
-                    continue;
-            }
-            gtk_tree_model_get(model, &iter, COL_TEXT, &item_text, -1);
-            if (item_text) {
-                /* in-line completion */
-                if ( app->complete && gtk_entry_get_text_length(app->entry) == to ) {
-                    app->complete = !complete(item_text, app);
+        filter_visible = !*b;
+        model = GTK_TREE_MODEL(app->store);
+        if ( gtk_tree_model_get_iter_first(model, &iter) ) {
+            do {
+                if (filter_visible) {
+                    gtk_tree_model_get( model, &iter,
+                            COL_VISIBLE, &visible, -1 );
+                    if (!visible)
+                        continue;
                 }
 
-                visible = match_tokens(item_text, filter_text) != NULL;
-                gtk_list_store_set(app->store, &iter, COL_VISIBLE, visible, -1);
+                gtk_tree_model_get(model, &iter, COL_TEXT, &item_text, -1);
+                if (item_text) {
+                    visible = match_tokens(item_text, filter_text) != NULL;
+                    gtk_list_store_set(app->store, &iter, COL_VISIBLE, visible, -1);
+                    g_free(item_text);
+                }
+            } while( gtk_tree_model_iter_next(model, &iter) );
+        }
+    }
+    g_free(last_filter_text);
+    last_filter_text = filter_text;
+
+    /* in-line auto-completion */
+    /* complete only if text cursor is at the end of entry */
+    /* and no entry text is selected */
+    app->complete = app->complete && from == to &&
+        gtk_entry_get_text_length(app->entry) == to;
+
+    model = gtk_tree_view_get_model(app->tree_view);
+    if ( app->complete && gtk_tree_model_get_iter_first(model, &iter) ) {
+        do {
+            gtk_tree_model_get(model, &iter, COL_TEXT, &item_text, -1);
+            if (item_text) {
+                for( a = item_text, b = filter_text;
+                        *a && *b && *a == *b;
+                        ++a, ++b );
+                if (*a && !*b) {
+                    app->complete = FALSE;
+                    GtkTreePath *path =
+                        gtk_tree_model_get_path(model, &iter);
+                    gtk_tree_view_set_cursor( app->tree_view, path,
+                            NULL, FALSE);
+                    g_free(item_text);
+                    break;
+                }
 
                 g_free(item_text);
             }
@@ -1014,7 +1060,10 @@ gboolean refilter(Application *app)
     return FALSE;
 }
 
-/** Refilter list after #REFILTER_DELAY milliseconds (sets Application::filter_timer). */
+/**
+ * Refilter list after delay.
+ * Refiltering operation is delayed #REFILTER_DELAY milliseconds.
+ */
 void delayed_refilter(Application *app)
 {
     if (app->filter_timer)
@@ -1037,7 +1086,6 @@ void insert_text( GtkEditable *editable,
 {
     if (app->filter) {
         app->complete = TRUE;
-        delayed_refilter(app);
     }
 }
 
@@ -1052,6 +1100,20 @@ void delete_text( GtkEditable *editable,
 {
     if (app->filter) {
         app->complete = FALSE;
+    }
+}
+
+/**
+ * Handler called if entry text was changed.
+ * \callgraph
+ */
+void text_changed( GtkEditable *editable,
+                   Application *app )
+{
+    if (app->filter) {
+        g_free(app->original_text);
+        app->original_text = g_strdup( gtk_entry_get_text(app->entry) );
+
         delayed_refilter(app);
     }
 }
@@ -1175,6 +1237,8 @@ Application *new_application(const Options *options)
     app->i_separator = options->i_separator;
     app->o_separator = options->o_separator;
     app->exit_code = 1;
+    app->original_text = g_strdup("");
+    app->sorted_model = NULL;
 
     /** Creates: */
     /** - main window, */
@@ -1193,9 +1257,10 @@ Application *new_application(const Options *options)
                     G_TYPE_BOOLEAN,
                     GDK_TYPE_PIXBUF,
                     G_TYPE_STRING );
-    model = create_filtered_model( GTK_TREE_MODEL(app->store) );
-    if (options->sort_list)
-        model = create_sorted_model(model);
+    model = app->filtered_model = create_filtered_model( GTK_TREE_MODEL(app->store) );
+    if (options->sort_list) {
+        model = app->sorted_model = create_sorted_model(model);
+    }
 
     /** - list view, */
     app->tree_view = create_list_view(model);
@@ -1209,26 +1274,37 @@ Application *new_application(const Options *options)
     }
 
     /** - scrolled window for item list. */
-    app->scroll_window = GTK_SCROLLED_WINDOW( gtk_scrolled_window_new(NULL, NULL) );
+    app->scroll_window =
+        GTK_SCROLLED_WINDOW( gtk_scrolled_window_new(NULL, NULL) );
     gtk_scrolled_window_set_policy( app->scroll_window,
             GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC );
 
     /* signals */
-    g_signal_connect(app->window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
-    g_signal_connect(app->window, "key-press-event", G_CALLBACK(on_key_press), app);
-    g_signal_connect(app->tree_view, "key-press-event", G_CALLBACK(tree_view_on_key_press), app);
-    g_signal_connect(app->entry, "key-press-event", G_CALLBACK(entry_on_key_press), app);
-    g_signal_connect(app->entry, "insert-text", G_CALLBACK(insert_text), app);
-    g_signal_connect(app->entry, "delete-text", G_CALLBACK(delete_text), app);
-    g_signal_connect_swapped(app->button, "clicked", G_CALLBACK(submit), app);
-    g_signal_connect_swapped(app->entry, "focus-in-event", G_CALLBACK(enable_filter), app );
-    g_signal_connect_swapped(app->entry, "focus-out-event", G_CALLBACK(disable_filter), app );
+    g_signal_connect( app->window, "destroy",
+                      G_CALLBACK(gtk_main_quit), NULL );
+    g_signal_connect( app->window, "key-press-event",
+                      G_CALLBACK(on_key_press), app );
+    g_signal_connect( app->tree_view, "key-press-event",
+                      G_CALLBACK(tree_view_on_key_press), app );
+    g_signal_connect( app->entry, "key-press-event",
+                      G_CALLBACK(entry_on_key_press), app );
+    g_signal_connect( app->entry, "insert-text",
+                      G_CALLBACK(insert_text), app );
+    g_signal_connect( app->entry, "delete-text",
+                      G_CALLBACK(delete_text), app );
+    g_signal_connect( app->entry, "changed",
+                      G_CALLBACK(text_changed), app );
+    g_signal_connect_swapped( app->button, "clicked",
+                              G_CALLBACK(submit), app);
+    g_signal_connect_swapped( app->entry, "focus-in-event",
+                              G_CALLBACK(enable_filter), app );
+    g_signal_connect_swapped( app->entry, "focus-out-event",
+                              G_CALLBACK(disable_filter), app );
 
     /* on item selected */
     gtk_tree_selection_set_select_function(
             gtk_tree_view_get_selection(app->tree_view),
-            item_select, app, NULL
-    );
+            item_select, app, NULL );
 
     /* lay out widgets */
     layout = gtk_vbox_new(FALSE, 2);
@@ -1238,8 +1314,10 @@ Application *new_application(const Options *options)
     gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app->entry), 1,1,0 );
     gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app->button), 0,1,0 );
     gtk_box_pack_start( GTK_BOX(layout), hbox, 0,1,0 );
-    gtk_box_pack_start( GTK_BOX(layout), GTK_WIDGET(app->scroll_window), 1,1,0 );
-    gtk_container_add( GTK_CONTAINER(app->scroll_window), GTK_WIDGET(app->tree_view) );
+    gtk_box_pack_start( GTK_BOX(layout), GTK_WIDGET(app->scroll_window),
+                        1,1,0 );
+    gtk_container_add( GTK_CONTAINER(app->scroll_window),
+                       GTK_WIDGET(app->tree_view) );
 
     /* show widgets (from inner-most) */
     gtk_widget_show( GTK_WIDGET(app->tree_view) );
