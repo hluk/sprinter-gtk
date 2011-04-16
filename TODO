@@ -1,3 +1,4 @@
+- exec command option: replace %s with parameters
 - implement program options: strict (-S)
 - try to fit main.c under 1000 lines (without sacrificing readability)
 - horizontal layout

@@ -74,7 +74,7 @@
 /** delay (in milliseconds) for list refiltering */
 #define REFILTER_DELAY 200
 /** delay (in milliseconds) for selection processing */
-#define SELECT_DELAY 150
+#define SELECT_DELAY 200
 
 /**\{ \name Default option values */
 /** default window title */
@@ -129,6 +129,8 @@ typedef struct {
     gboolean filter;
     /** timer for filtering items (for better performance) */
     GSource *filter_timer;
+    /** timer for processing list selection (for better performance) */
+    GSource *select_timer;
 
     /** Hide list initially (minimal mode). */
     gboolean hide_list;
@@ -205,6 +207,10 @@ typedef struct {
     /** options correctly parsed */
     gboolean ok;
 } Options;
+
+
+extern void submit(Application *app);
+
 
 /** Prints help. */
 void help()
@@ -500,24 +506,6 @@ Options new_options(int argc, char *argv[])
     return options;
 }
 
-
-static void submit(Application *app)
-{
-    gsize len, len2;
-    gchar *txt;
-
-    GIOChannel *out = g_io_channel_unix_new( fileno(stdout) );
-    /* data is binary */
-    g_io_channel_set_encoding(out, NULL, NULL);
-
-    txt = unescape( gtk_entry_get_text(app->entry), &len );
-    g_io_channel_write_chars(out, txt, len, &len2, NULL);
-    g_io_channel_shutdown(out, TRUE, NULL);
-    g_free(txt);
-
-    app->exit_code = 0;
-    gtk_main_quit();
-}
 
 /** Hides list. */
 void hide_list(Application *app)
@@ -1039,6 +1027,11 @@ void selection_changed( Application *app )
     gint sep_len = 0;
     const gchar *text;
 
+    if (app->select_timer) {
+        g_source_destroy(app->select_timer);
+        app->select_timer = NULL;
+    }
+
     if ( app->filter_timer ||
          gtk_tree_selection_count_selected_rows(selection) == 0 ) {
         return;
@@ -1089,9 +1082,12 @@ void selection_changed( Application *app )
  */
 void delayed_selection_changed(Application *app)
 {
-    static GSource *select_timer = NULL;
-    delayed_call( &select_timer, SELECT_DELAY,
-                  (GSourceFunc)selection_changed, app );
+    if ( gtk_widget_has_focus(app->tree_view) ) {
+        delayed_call( &app->select_timer, SELECT_DELAY,
+                      (GSourceFunc)selection_changed, app );
+    } else {
+        selection_changed(app);
+    }
 }
 
 /**
@@ -1355,7 +1351,7 @@ Application *new_application(const Options *options)
     app = malloc( sizeof(Application) );
 
     app->complete = TRUE;
-    app->filter_timer = NULL;
+    app->filter_timer = app->select_timer = NULL;
     app->hide_list = options->hide_list;
     app->i_separator = options->i_separator;
     app->o_separator = options->o_separator;
@@ -1458,6 +1454,30 @@ Application *new_application(const Options *options)
     gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
 
     return app;
+}
+
+
+/** Submits selected items or entry text. */
+void submit(Application *app)
+{
+    gsize len, len2;
+    gchar *txt;
+
+    if ( app->select_timer ) {
+        selection_changed(app);
+    }
+
+    GIOChannel *out = g_io_channel_unix_new( fileno(stdout) );
+    /* data is binary */
+    g_io_channel_set_encoding(out, NULL, NULL);
+
+    txt = unescape( gtk_entry_get_text(app->entry), &len );
+    g_io_channel_write_chars(out, txt, len, &len2, NULL);
+    g_io_channel_shutdown(out, TRUE, NULL);
+    g_free(txt);
+
+    app->exit_code = 0;
+    gtk_main_quit();
 }
 
 /**
