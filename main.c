@@ -73,6 +73,8 @@
 
 /** delay (in milliseconds) for list refiltering */
 #define REFILTER_DELAY 200
+/** delay (in milliseconds) for selection processing */
+#define SELECT_DELAY 150
 
 /**\{ \name Default option values */
 /** default window title */
@@ -80,7 +82,7 @@
 /** default label */
 #define DEFAULT_LABEL "submit"
 /** default input separator */
-#define DEFAULT_INPUT_SEPARATOR "\n"
+#define DEFAULT_INPUT_SEPARATOR "\\n"
 /** default output separator */
 #define DEFAULT_OUTPUT_SEPARATOR NULL
 /** default window width */
@@ -226,17 +228,40 @@ void help_geometry()
 }
 
 /**
+ * Find separator in bytes for \c bsearch.
+ */
+const gchar *find_separator( const gchar *sep, size_t sep_len,
+                             const gchar *str, size_t len )
+{
+    int i;
+
+    if (!sep_len) {
+        return NULL;
+    }
+
+    for ( i = 0; sep_len <= len-i; ++i ) {
+        if ( memcmp(sep, str+i, sep_len) == 0 ) {
+            return str+i;
+        }
+    }
+
+    return NULL;
+}
+
+/**
  * Unescapes string.
+ * Since the result can contain multiple \0 characters,
+ * the unescaped string length is saved to \a len.
  * \returns new unescaped string
  */
-gchar *unescape(const gchar *str)
+gchar *unescape(const gchar *str, gsize *len)
 {
     /* new string is not larger than original */
     gchar *result, *r;
     const gchar *s;
     gboolean escape;
 
-    result = malloc( strlen(str) );
+    result = g_malloc( strlen(str)+1 );
 
     for( s = str, r = result, escape = FALSE; *s; ++s ) {
         if (escape) {
@@ -244,6 +269,8 @@ gchar *unescape(const gchar *str)
                 *(r++) = '\n';
             else if (*s == 't')
                 *(r++) = '\t';
+            else if (*s == '0')
+                *(r++) = '\0';
             else
                 *(r++) = *s;
             escape = FALSE;
@@ -252,6 +279,48 @@ gchar *unescape(const gchar *str)
         } else {
             *(r++) = *s;
         }
+    }
+    *r = 0;
+    *len = r-result;
+
+    return result;
+}
+
+/**
+ * Escapes string.
+ * \returns new escaped string
+ */
+gchar *escape(const gchar *str)
+{
+    /* new string is not larger than original */
+    gchar *result, *r;
+    const gchar *s;
+    gboolean escape;
+
+    result = g_malloc( 2*strlen(str)+1 );
+
+    for( s = str, r = result, escape = FALSE; *s; ++s ) {
+        if (escape) {
+            if (*s == 'n' || *s == 't' || *s == '0') {
+                *(r++) = '\\';
+            }
+            *(r++) = *s;
+            escape = FALSE;
+        } else if (*s == '\\') {
+            escape = TRUE;
+        } else if (*s == '\n') {
+            *(r++) = '\\';
+            *(r++) = 'n';
+        } else if (*s == '\t') {
+            *(r++) = '\\';
+            *(r++) = 't';
+        } else {
+            *(r++) = *s;
+        }
+    }
+    if (escape) {
+        *r = '\\';
+        ++r;
     }
     *r = 0;
 
@@ -382,7 +451,7 @@ Options new_options(int argc, char *argv[])
                 break;
             }
             ++i;
-            options.i_separator = unescape(argp);
+            options.i_separator = escape(argp);
         } else if (arg == 'l') {
             if (!argp) {
                 help();
@@ -400,7 +469,7 @@ Options new_options(int argc, char *argv[])
                 break;
             }
             ++i;
-            options.o_separator = unescape(argp);
+            options.o_separator = escape(argp);
         } else if (arg == 's') {
             options.sort_list = TRUE;
         } else if (arg == 'S') {
@@ -434,7 +503,18 @@ Options new_options(int argc, char *argv[])
 
 static void submit(Application *app)
 {
-    g_print( gtk_entry_get_text(app->entry) );
+    gsize len, len2;
+    gchar *txt;
+
+    GIOChannel *out = g_io_channel_unix_new( fileno(stdout) );
+    /* data is binary */
+    g_io_channel_set_encoding(out, NULL, NULL);
+
+    txt = unescape( gtk_entry_get_text(app->entry), &len );
+    g_io_channel_write_chars(out, txt, len, &len2, NULL);
+    g_io_channel_shutdown(out, TRUE, NULL);
+    g_free(txt);
+
     app->exit_code = 0;
     gtk_main_quit();
 }
@@ -471,6 +551,22 @@ gboolean disable_filter(Application *app)
 {
     app->filter = FALSE;
     return FALSE;
+}
+
+/**
+ * Delayed function call.
+ * Calls \a func after \a delay milliseconds (sets \a timer).
+ */
+void delayed_call( GSource **timer,
+                   guint delay,
+                   GSourceFunc func,
+                   Application *app )
+{
+    if (*timer)
+        g_source_destroy(*timer);
+    *timer = g_timeout_source_new(delay);
+    g_source_set_callback(*timer, func, app, NULL);
+    g_source_attach(*timer, NULL);
 }
 
 /** window key-press-event handler */
@@ -685,8 +781,8 @@ gchar *get_filter_text(gint *from, gint *to, Application *app)
 {
     const gchar *filter_text;
     gchar *sep = app->o_separator;
-    gchar *a;
-    gint sep_len;
+    size_t sep_len;
+    const gchar *a;
 
     gtk_editable_get_selection_bounds(GTK_EDITABLE(app->entry), from, to);
     if (*from == *to)
@@ -694,8 +790,9 @@ gchar *get_filter_text(gint *from, gint *to, Application *app)
 
     filter_text = gtk_entry_get_text(app->entry);
 
-    if (sep && *sep) {
+    if (sep) {
         sep_len = strlen(sep);
+        a = filter_text;
         while( (a = strstr(filter_text, sep)) ) {
             filter_text = a+sep_len;
         }
@@ -756,14 +853,14 @@ void append_item(char *text, Application *app)
  */
 gboolean read_items(Application *app)
 {
-    static gchar buf[BUFSIZ] = "";
+    static gchar buf[BUFSIZ];
     static gchar *bufp = buf;
     static struct timeval stdin_tv = {0,0};
     fd_set stdin_fds;
-    int i, c;
-    const gchar *a, *b;
+    int i, j, c;
     const gchar *sep = app->i_separator;
-    const int sep_len = strlen(sep);
+    gchar *xsep;
+    size_t sep_len = strlen(sep);
 
     /* disable stdin buffering (otherwise select waits on new line) */
     setbuf(stdin, NULL);
@@ -778,14 +875,39 @@ gboolean read_items(Application *app)
 
         /* read data */
         if ( (c = getchar()) != EOF ) {
-            *bufp = c;
+            /* escape */
+            switch(c) {
+                case '\\':
+                    *bufp = '\\';
+                    *++bufp = '\\';
+                    break;
+                case '\n':
+                    *bufp = '\\';
+                    *++bufp = 'n';
+                    break;
+                case '\t':
+                    *bufp = '\\';
+                    *++bufp = 't';
+                    break;
+                case '\0':
+                    *bufp = '\\';
+                    *++bufp = '0';
+                    break;
+                default:
+                    *bufp = c;
+            }
             ++bufp;
+
             /* is separator? */
-            if (sep_len) {
-                for( a = bufp-sep_len, b = sep;
-                        *b && a < bufp && *a == *b; ++a, ++b );
-                if (!*b) {
-                    *(bufp-sep_len) = 0;
+            xsep = bufp-sep_len;
+            if (sep_len && xsep >= buf) {
+                /* skip first escaped char if any */
+                for (j = 1; xsep >= buf+j && *(xsep-j) == '\\'; ++j);
+                if ( !(j&1) ) ++xsep;
+
+                *bufp = 0;
+                if ( strcmp(sep, xsep) == 0 ) {
+                    *xsep = 0;
                     bufp = buf;
 
                     /* append new item if not empty */
@@ -794,7 +916,7 @@ gboolean read_items(Application *app)
                 }
             }
 
-            if ( bufp >= &buf[BUFSIZ-1] ) {
+            if ( bufp+3 >= &buf[BUFSIZ] ) {
                 /** \bug Doesn't handle buffer overflow. */
                 g_printerr(ERR_BUFFER_TOO_SMALL, BUFSIZ);
                 app->exit_code = 2;
@@ -907,23 +1029,19 @@ void append_item_text( GtkTreeModel *model,
 }
 
 /**
- * Handler called if item is selected.
+ * Handler called if list selection is changed.
  */
-gboolean item_select( GtkTreeSelection *selection,
-                      GtkTreeModel *model,
-                      GtkTreePath *path,
-                      gboolean path_currently_selected,
-                      gpointer user_data )
+void selection_changed( Application *app )
 {
-    Application *app = (Application *)user_data;
-    GtkTreeIter iter;
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(app->tree_view);
     gchar *sep = app->o_separator;
     const gchar *a, *b;
     gint sep_len = 0;
     const gchar *text;
 
-    if (path_currently_selected) {
-        return TRUE;
+    if ( app->filter_timer ||
+         gtk_tree_selection_count_selected_rows(selection) == 0 ) {
+        return;
     }
 
     disable_filter(app);
@@ -947,9 +1065,9 @@ gboolean item_select( GtkTreeSelection *selection,
     /** Changes entry text to item text. */
     gtk_entry_buffer_delete_text( gtk_entry_get_buffer(app->entry), b-text, -1);
     gtk_tree_selection_selected_foreach(selection, append_item_text, app);
-    if ( gtk_tree_model_get_iter(model, &iter, path) &&
-         !gtk_tree_selection_path_is_selected(selection, path) )
-        append_item_text(model, path, &iter, app);
+    /*if ( gtk_tree_model_get_iter(model, &iter, path) &&*/
+         /*!gtk_tree_selection_path_is_selected(selection, path) )*/
+        /*append_item_text(model, path, &iter, app);*/
 
     /** select text */
     gtk_editable_select_region( GTK_EDITABLE(app->entry),
@@ -963,8 +1081,17 @@ gboolean item_select( GtkTreeSelection *selection,
     }
 
     enable_filter(app);
+}
 
-    return TRUE;
+/**
+ * Process selection after delay.
+ * Selection processing operation is delayed #SELECT_DELAY milliseconds.
+ */
+void delayed_selection_changed(Application *app)
+{
+    static GSource *select_timer = NULL;
+    delayed_call( &select_timer, SELECT_DELAY,
+                  (GSourceFunc)selection_changed, app );
 }
 
 /**
@@ -1066,12 +1193,8 @@ gboolean refilter(Application *app)
  */
 void delayed_refilter(Application *app)
 {
-    if (app->filter_timer)
-        g_source_destroy(app->filter_timer);
-    app->filter_timer = g_timeout_source_new(REFILTER_DELAY);
-    g_source_set_callback( app->filter_timer,
-                           (GSourceFunc)refilter, app, NULL );
-    g_source_attach(app->filter_timer, NULL);
+    delayed_call( &app->filter_timer, REFILTER_DELAY,
+                  (GSourceFunc)refilter, app );
 }
 
 /**
@@ -1302,9 +1425,9 @@ Application *new_application(const Options *options)
                               G_CALLBACK(disable_filter), app );
 
     /* on item selected */
-    gtk_tree_selection_set_select_function(
-            gtk_tree_view_get_selection(app->tree_view),
-            item_select, app, NULL );
+    g_signal_connect_swapped( gtk_tree_view_get_selection(app->tree_view),
+                              "changed",
+                              G_CALLBACK(delayed_selection_changed), app );
 
     /* lay out widgets */
     layout = gtk_vbox_new(FALSE, 2);

@@ -9,9 +9,9 @@ CP = /bin/cp
 RM = /bin/rm -f
 
 PKGS = gtk+-2.0 gdk-2.0
-#CFLAGS = -Wall -O0 -ggdb `$(PKG_CONFIG) --cflags $(PKGS)`
+CFLAGS = -Wall -O0 -ggdb `$(PKG_CONFIG) --cflags $(PKGS)`
 #CFLAGS = -pedantic -std=c99 -Wall -Os -march=native -fomit-frame-pointer `$(PKG_CONFIG) --cflags $(PKGS)`
-CFLAGS = -Wall -Os -march=native -fomit-frame-pointer `$(PKG_CONFIG) --cflags $(PKGS)`
+#CFLAGS = -Wall -Os -march=native -fomit-frame-pointer `$(PKG_CONFIG) --cflags $(PKGS)`
 LFLAGS = `$(PKG_CONFIG) --libs $(PKGS)`
 
 .PHONY:all watch clean

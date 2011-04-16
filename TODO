@@ -1,4 +1,3 @@
-- handle reading \0 from stdin and \0 as separator
 - implement program options: strict (-S)
 - try to fit main.c under 1000 lines (without sacrificing readability)
 - horizontal layout
