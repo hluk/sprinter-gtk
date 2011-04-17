@@ -954,6 +954,10 @@ gint natural_compare( GtkTreeModel *model,
         }
     }
 
+    if (!result && *aa != *bb) {
+        result = *aa - *bb;
+    }
+
     g_free(item1);
     g_free(item2);
 
@@ -1082,7 +1086,7 @@ void selection_changed( Application *app )
  */
 void delayed_selection_changed(Application *app)
 {
-    if ( gtk_widget_has_focus(app->tree_view) ) {
+    if ( gtk_widget_has_focus(GTK_WIDGET(app->tree_view)) ) {
         delayed_call( &app->select_timer, SELECT_DELAY,
                       (GSourceFunc)selection_changed, app );
     } else {
@@ -1165,7 +1169,7 @@ gboolean refilter(Application *app)
                 for( a = item_text, b = filter_text;
                         *a && *b && *a == *b;
                         ++a, ++b );
-                if (*a && !*b) {
+                if (!*b) {
                     app->complete = FALSE;
                     GtkTreePath *path =
                         gtk_tree_model_get_path(model, &iter);
