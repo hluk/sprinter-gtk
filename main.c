@@ -170,7 +170,8 @@ const Argument arguments[] = {
     {'o', "output-separator",  "string which separates items on output"},
     {'s', "sort",              "sort items naturally"},
     /*{'S', "strict",            "choose only items from stdin"},*/
-    {'t', "title",             "title"}
+    {'t', "title",             "title"},
+    {'0', "zero-terminated",   "items on input are terminated with zero byte"}
 };
 
 /** undefined value for an option */
@@ -488,6 +489,8 @@ Options new_options(int argc, char *argv[])
             }
             ++i;
             options.title = argp;
+        } else if (arg == '0') {
+            options.i_separator = "\\0";
         } else {
             help();
             options.ok = FALSE;
@@ -608,7 +611,7 @@ gboolean tree_view_on_key_press( GtkWidget *widget,
                         disable_filter(app);
                         gtk_entry_set_text(app->entry, app->original_text);
                         gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
-                        gtk_entry_set_position(app->entry, -1);
+                        gtk_editable_set_position( GTK_EDITABLE(app->entry), -1);
                         enable_filter(app);
                         return TRUE;
                     }
@@ -621,7 +624,7 @@ gboolean tree_view_on_key_press( GtkWidget *widget,
             case GDK_KEY_Left:
             case GDK_KEY_Right:
                 gtk_widget_grab_focus( GTK_WIDGET(app->entry) );
-                gtk_entry_set_position( app->entry,
+                gtk_editable_set_position( GTK_EDITABLE(app->entry),
                                         key == GDK_KEY_Left ? 0 : -1 );
                 return TRUE;
         }
@@ -1007,16 +1010,19 @@ void append_item_text( GtkTreeModel *model,
 {
     Application *app = (Application *)user_data;
     GtkEntry *entry = app->entry;
+    GtkEditable *editable = GTK_EDITABLE(entry);
     gchar *item;
+    gint pos;
 
     gtk_tree_model_get(model, iter, COL_TEXT, &item, -1);
     /**
      * \bug Separator with new line character (\\n)
      * doesn't show correctly in entry.
      */
+    pos = gtk_editable_get_position(editable);
     if ( gtk_entry_get_text_length(entry) )
-        gtk_entry_append_text(entry, app->o_separator ? app->o_separator : "");
-    gtk_entry_append_text(entry, item);
+        gtk_editable_insert_text(editable, app->o_separator ? app->o_separator : "", -1, &pos);
+    gtk_editable_insert_text(editable, item, -1, &pos);
     g_free(item);
 }
 
@@ -1366,9 +1372,9 @@ Application *new_application(const Options *options)
     /** Creates: */
     /** - main window, */
     app->window = GTK_WINDOW( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
-    gtk_window_set_title( app->window, options->title );
+    gtk_window_set_title(app->window, options->title);
     pixbuf = gdk_pixbuf_new_from_inline(-1, sprinter_icon, FALSE, NULL);
-    gtk_window_set_icon( app->window, pixbuf );
+    gtk_window_set_icon(app->window, pixbuf);
 
     /** - text entry, */
     app->entry = GTK_ENTRY( gtk_entry_new() );
