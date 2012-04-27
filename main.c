@@ -783,7 +783,6 @@ gchar *get_filter_text(gint *from, gint *to, Application *app)
 
     if (sep) {
         sep_len = strlen(sep);
-        a = filter_text;
         while( (a = strstr(filter_text, sep)) ) {
             filter_text = a+sep_len;
         }
@@ -1068,9 +1067,6 @@ void selection_changed( Application *app )
     /** Changes entry text to item text. */
     gtk_entry_buffer_delete_text( gtk_entry_get_buffer(app->entry), b-text, -1);
     gtk_tree_selection_selected_foreach(selection, append_item_text, app);
-    /*if ( gtk_tree_model_get_iter(model, &iter, path) &&*/
-         /*!gtk_tree_selection_path_is_selected(selection, path) )*/
-        /*append_item_text(model, path, &iter, app);*/
 
     /** select text */
     gtk_editable_select_region( GTK_EDITABLE(app->entry),
@@ -1092,12 +1088,8 @@ void selection_changed( Application *app )
  */
 void delayed_selection_changed(Application *app)
 {
-    if ( gtk_widget_has_focus(GTK_WIDGET(app->tree_view)) ) {
-        delayed_call( &app->select_timer, SELECT_DELAY,
-                      (GSourceFunc)selection_changed, app );
-    } else {
-        selection_changed(app);
-    }
+    delayed_call( &app->select_timer, SELECT_DELAY,
+                  (GSourceFunc)selection_changed, app );
 }
 
 /**
@@ -1436,8 +1428,12 @@ Application *new_application(const Options *options)
                               G_CALLBACK(delayed_selection_changed), app );
 
     /* lay out widgets */
-    layout = gtk_vbox_new(FALSE, 2);
-    hbox = gtk_hbox_new(FALSE, 2);
+    layout = gtk_box_new(FALSE, 2);
+    gtk_orientable_set_orientation( GTK_ORIENTABLE(layout),
+                                    GTK_ORIENTATION_VERTICAL );
+    hbox = gtk_box_new(FALSE, 2);
+    gtk_orientable_set_orientation( GTK_ORIENTABLE(hbox),
+                                    GTK_ORIENTATION_HORIZONTAL );
     /*gtk_container_set_border_width( GTK_CONTAINER(window), 2 );*/
     gtk_container_add( GTK_CONTAINER(app->window), layout );
     gtk_box_pack_start( GTK_BOX(hbox), GTK_WIDGET(app->entry), 1,1,0 );

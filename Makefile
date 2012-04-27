@@ -1,5 +1,4 @@
 # utils
-CC = /usr/bin/gcc
 PKG_CONFIG = /usr/bin/pkg-config
 CONVERT = /usr/bin/convert
 NOTIFY = /usr/bin/inotifywait
